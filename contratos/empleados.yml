@@ -1,0 +1,105 @@
+fuente: empleados
+version: 1
+ultima_actualizacion: '2026-11-19'
+responsable: recursos_humanos
+llegada: CSV en /Volumes/proyecto_final/default/vol_landing/empleados/
+metodo_ingesta: 'Auto Loader: eventos incrementales y llegada tardía'
+frecuencia_esperada: tres lotes de eventos
+tabla_bronze: proyecto_final.bronze.empleados
+tabla_silver: proyecto_final.silver.empleados
+llave_evento: (id_empleado, fecha_evento, fecha_registro, tipo_evento); comprobar colisiones exactas
+llave_entidad: id_empleado
+historizacion:
+  tipo: SCD Type 2
+  implementacion: intervalos derivados con ventanas y reconstrucción por cada lote
+  columnas_de_vigencia:
+  - vigente_desde
+  - vigente_hasta
+  orden_de_los_cambios: fecha_evento, fecha_registro, desempate determinista
+  eventos_mismo_dia: ordenar por fecha_registro
+  llegada_tardia: recalcular versiones afectadas por el evento anterior y el siguiente
+columnas:
+- nombre: id_empleado
+  tipo: string
+  nulo: false
+- nombre: nombre
+  tipo: string
+  nulo: false
+- nombre: dni
+  tipo: string
+  nulo: true
+  sensible: true
+  masking: 'mask_dni: solo electrocasa_ingenieria ve el valor real; fallback current_user() documentado'
+- nombre: email
+  tipo: string
+  nulo: true
+- nombre: salario
+  tipo: decimal(12,2)
+  nulo: false
+  regla: entre 500 y 20000; umbral propuesto
+  sensible: true
+  masking: 'mask_salario: solo electrocasa_ingenieria ve el valor real; fallback current_user() documentado'
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+- nombre: cargo
+  tipo: string
+  nulo: false
+- nombre: tipo_evento
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - alta
+  - transferencia
+  - cambio_salario
+  - baja
+- nombre: fecha_evento
+  tipo: date
+  nulo: false
+- nombre: fecha_registro
+  tipo: timestamp
+  nulo: false
+reglas_de_calidad:
+- nombre: evento_ubicable
+  condicion: id_empleado IS NOT NULL AND fecha_evento IS NOT NULL
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: No se puede ubicar un evento sin empleado y fecha.
+- nombre: salario_razonable
+  condicion: salario BETWEEN 500 AND 20000
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Salarios fuera de rango distorsionan el historial; umbral propuesto a validar.
+transformaciones_silver:
+- Normalizar 13 variantes de evento a alta, transferencia, cambio_salario y baja (incluye cese).
+- Ordenar por fecha_evento y luego fecha_registro; para empates exactos añadir desempate determinista por archivo
+  y fila.
+- Reconstruir intervalos SCD2 por empleado para insertar eventos tardíos en posición histórica, usando lead sobre
+  orden temporal.
+- Mantener dni nulo permitido con advertencia; detectar DNI compartido entre distintos id_empleado y derivar a revisión.
+- Preservar salario y dni originales solo para ingeniería mediante máscara en definición de pipeline.
+problemas_conocidos:
+- problema: fecha_evento ausente
+  ejemplo: fecha_evento=""
+  filas_afectadas: 38
+  tratamiento: cuarentena
+- problema: dni vacío
+  ejemplo: dni=""
+  filas_afectadas: 58
+  tratamiento: permitido con advertencia
+- problema: salarios mayores a 20000
+  ejemplo: salario > 20000
+  filas_afectadas: 18
+  tratamiento: cuarentena para revisión
+- problema: mismo DNI en empleados diferentes
+  ejemplo: DNI compartido entre IDs
+  filas_afectadas: 6
+  tratamiento: marcar para auditoría; cifra = DNI distintos
+- problema: más de un evento mismo día
+  ejemplo: id_empleado y fecha_evento repetidos
+  filas_afectadas: 38
+  tratamiento: desempatar por fecha_registro
+llave: id_empleado
+notas_implementacion:
+- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
+- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'

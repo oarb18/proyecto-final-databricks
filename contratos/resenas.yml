@@ -1,0 +1,86 @@
+fuente: resenas
+version: 1
+ultima_actualizacion: '2026-11-19'
+responsable: atencion_cliente
+llegada: JSON Lines en /Volumes/proyecto_final/default/vol_landing/resenas/
+metodo_ingesta: 'Auto Loader: JSON Lines incremental con arreglos anidados'
+frecuencia_esperada: dos lotes julio y octubre
+tabla_bronze: proyecto_final.bronze.resenas
+tabla_silver: proyecto_final.silver.resenas
+llave: resena_id
+columnas:
+- nombre: resena_id
+  tipo: string
+  nulo: false
+- nombre: producto_id
+  tipo: string
+  nulo: false
+  regla: producto del catálogo existente
+- nombre: cliente_id
+  tipo: string
+  nulo: false
+- nombre: calificacion
+  tipo: int
+  nulo: false
+  regla: entre 1 y 5
+- nombre: comentario
+  tipo: string
+  nulo: true
+- nombre: tags
+  tipo: array<string>
+  nulo: true
+- nombre: respuestas
+  tipo: array<struct<autor:string,texto:string,fecha:string>>
+  nulo: true
+- nombre: fecha_resena
+  tipo: date
+  nulo: false
+- nombre: metadata
+  tipo: string
+  nulo: true
+reglas_de_calidad:
+- nombre: calificacion_en_escala
+  condicion: calificacion BETWEEN 1 AND 5
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Las calificaciones inválidas alterarían el porcentaje negativo.
+- nombre: resena_identificada
+  condicion: resena_id IS NOT NULL AND producto_id IS NOT NULL AND fecha_resena IS NOT NULL
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Sin dimensiones no se puede agregar por producto y mes.
+transformaciones_silver:
+- Convertir fechas con varios formatos de forma tolerante.
+- Mantener tags como array<string>, respuestas como array<struct<autor:string,texto:string,fecha:string>> y metadata
+  como JSON string.
+- Coalesce(tags, array()) en Silver, sin confundir nulo original de Bronze.
+- Deduplicar resena_id entre lotes.
+- Producto huérfano va a cuarentena y no cuenta en Gold; comentario y autor de respuesta pueden faltar.
+problemas_conocidos:
+- problema: calificación inválida o nula
+  ejemplo: 0, 6, null
+  filas_afectadas: 103
+  tratamiento: cuarentena
+- problema: producto no presente en catálogo
+  ejemplo: producto_id huérfano
+  filas_afectadas: 113
+  tratamiento: cuarentena
+- problema: comentario nulo
+  ejemplo: comentario=null
+  filas_afectadas: 114
+  tratamiento: permitir nulo
+- problema: tags nulo
+  ejemplo: tags=null
+  filas_afectadas: 89
+  tratamiento: normalizar a arreglo vacío
+- problema: resenas repetidas
+  ejemplo: resena_id repetido en otro lote
+  filas_afectadas: 80
+  tratamiento: deduplicar
+- problema: respuesta sin autor
+  ejemplo: autor ausente
+  filas_afectadas: 8
+  tratamiento: advertir sin descartar reseña
+notas_implementacion:
+- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
+- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'

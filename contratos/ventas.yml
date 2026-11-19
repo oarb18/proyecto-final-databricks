@@ -1,0 +1,95 @@
+fuente: ventas
+version: 1
+ultima_actualizacion: '2026-11-19'
+responsable: area_comercial
+llegada: CSV en /Volumes/proyecto_final/default/vol_landing/ventas/
+metodo_ingesta: 'Auto Loader: tres lotes incrementales y reingestas'
+frecuencia_esperada: tres lotes marzo-octubre 2026
+tabla_bronze: proyecto_final.bronze.ventas
+tabla_silver: proyecto_final.silver.ventas
+llave: venta_id
+columnas:
+- nombre: venta_id
+  tipo: string
+  nulo: false
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+- nombre: producto_id
+  tipo: string
+  nulo: false
+  regla: producto del catálogo existente
+- nombre: vendedor_id
+  tipo: string
+  nulo: true
+- nombre: cantidad
+  tipo: int
+  nulo: false
+  regla: mayor a 0
+- nombre: monto_total
+  tipo: decimal(12,2)
+  nulo: false
+  regla: mayor a 0
+- nombre: metodo_pago
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - tarjeta
+  - efectivo
+  - transferencia
+  - yape
+  - plin
+- nombre: fecha_venta
+  tipo: timestamp
+  nulo: false
+- nombre: canal
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - tienda_fisica
+  - ecommerce
+reglas_de_calidad:
+- nombre: monto_positivo
+  condicion: monto_total IS NOT NULL AND monto_total > 0
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Evita distorsionar las ventas netas.
+- nombre: venta_completa
+  condicion: venta_id IS NOT NULL AND sucursal_id IS NOT NULL AND cantidad > 0 AND fecha_venta IS NOT NULL
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Sin llave, sucursal, unidades o fecha no se pueden calcular indicadores.
+transformaciones_silver:
+- Normalizar importes tanto 1.234,50 como 1234.50 antes de CAST decimal(12,2).
+- Convertir formatos yyyy-MM-dd, dd/MM/yyyy y timestamp ISO con try_to_timestamp.
+- Mapear 17 variantes de pago a tarjeta, efectivo, transferencia, yape y plin.
+- Deduplicar por venta_id con orden determinista de lote y archivo; no descartar vendedor_id nulo en ecommerce.
+- Para producto_id inexistente, enviar a cuarentena (decisión propuesta).
+problemas_conocidos:
+- problema: monto_total vacío
+  ejemplo: monto_total=""
+  filas_afectadas: 152
+  tratamiento: cuarentena por monto_positivo
+- problema: monto_total no positivo
+  ejemplo: monto_total <= 0
+  filas_afectadas: 201
+  tratamiento: cuarentena por monto_positivo
+- problema: venta_id reaparece en lotes
+  ejemplo: venta_id repetido
+  filas_afectadas: 240
+  tratamiento: deduplicar por venta_id
+- problema: producto sin catálogo
+  ejemplo: producto_id no presente en snapshots
+  filas_afectadas: 70
+  tratamiento: cuarentena por referencia huérfana
+- problema: sucursal_id vacío
+  ejemplo: sucursal_id=""
+  filas_afectadas: 105
+  tratamiento: cuarentena por venta_completa
+- problema: cantidad no positiva
+  ejemplo: cantidad=0
+  filas_afectadas: 68
+  tratamiento: cuarentena por venta_completa
+notas_implementacion:
+- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
+- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'

@@ -1,0 +1,75 @@
+fuente: devoluciones
+version: 1
+ultima_actualizacion: '2026-11-19'
+responsable: postventa
+llegada: CSV en /Volumes/proyecto_final/default/vol_landing/devoluciones/
+metodo_ingesta: 'Auto Loader: tres lotes incrementales'
+frecuencia_esperada: tres lotes marzo-octubre
+tabla_bronze: proyecto_final.bronze.devoluciones
+tabla_silver: proyecto_final.silver.devoluciones
+llave: devolucion_id
+depende_de:
+- fuente: ventas
+  columna: venta_id
+columnas:
+- nombre: devolucion_id
+  tipo: string
+  nulo: false
+- nombre: venta_id
+  tipo: string
+  nulo: false
+  regla: venta de origen existente
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+- nombre: producto_id
+  tipo: string
+  nulo: false
+- nombre: motivo
+  tipo: string
+  nulo: true
+- nombre: monto_reembolso
+  tipo: decimal(12,2)
+  nulo: false
+  regla: entre 0 y monto_total de la venta
+- nombre: fecha_devolucion
+  tipo: date
+  nulo: false
+reglas_de_calidad:
+- nombre: reembolso_valido
+  condicion: monto_reembolso >= 0 AND monto_reembolso <= monto_venta_origen
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: No contabilizar reembolsos negativos ni superiores a venta; evaluar después de join con Silver
+    ventas.
+- nombre: devolucion_referenciada
+  condicion: devolucion_id IS NOT NULL AND venta_id IS NOT NULL AND monto_venta_origen IS NOT NULL
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: La devolución requiere venta origen verificable.
+transformaciones_silver:
+- Convertir monto_reembolso a decimal(12,2) y fecha_devolucion a date.
+- Enriquecer primero con ventas Silver por venta_id para crear monto_venta_origen, y luego evaluar reembolso_valido
+  en la vista enriquecida.
+- Deduplicar devolucion_id a través de lotes; cuarentenar venta_id huérfana.
+- motivo vacío permitido pero señalado con advertencia.
+problemas_conocidos:
+- problema: reembolso negativo
+  ejemplo: monto_reembolso < 0
+  filas_afectadas: 38
+  tratamiento: cuarentena
+- problema: venta_id vacío
+  ejemplo: venta_id=""
+  filas_afectadas: 35
+  tratamiento: cuarentena
+- problema: motivo vacío
+  ejemplo: motivo=""
+  filas_afectadas: 71
+  tratamiento: permitir con advertencia
+- problema: devolución duplicada
+  ejemplo: devolucion_id repetido
+  filas_afectadas: 60
+  tratamiento: deduplicar
+notas_implementacion:
+- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
+- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'

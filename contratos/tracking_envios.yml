@@ -1,0 +1,87 @@
+fuente: tracking_envios
+version: 1
+ultima_actualizacion: '2026-11-19'
+responsable: courier_externo_y_logistica
+llegada: Azure SQL Database, tabla dbo.TrackingEnvios
+metodo_ingesta: Conector query-based de SQL Server (Lakeflow Connect), cursor fecha_modificacion
+connection_unity_catalog: 'PENDIENTE: nombre real de Connection'
+cursor: fecha_modificacion
+modo_historia: 'append only: preservar todos los cambios de estado con evento_id único'
+frecuencia_esperada: incremental por cursor; dos ejecuciones exigidas
+tabla_bronze: proyecto_final.bronze.tracking_envios
+tabla_silver: proyecto_final.silver.tracking_envios
+llave: evento_id
+depende_de:
+- fuente: ventas
+  columna: venta_id
+columnas:
+- nombre: evento_id
+  tipo: int
+  nulo: false
+- nombre: tracking_id
+  tipo: string
+  nulo: false
+- nombre: venta_id
+  tipo: string
+  nulo: true
+  regla: venta de origen existente
+- nombre: courier
+  tipo: string
+  nulo: true
+- nombre: estado_entrega
+  tipo: string
+  nulo: true
+  valores_permitidos:
+  - pendiente
+  - en_transito
+  - entregado
+  - devuelto
+- nombre: sucursal_origen
+  tipo: string
+  nulo: true
+- nombre: fecha_actualizacion
+  tipo: date
+  nulo: true
+- nombre: fecha_modificacion
+  tipo: timestamp
+  nulo: false
+reglas_de_calidad:
+- nombre: estado_conocido
+  condicion: estado_entrega IN ('pendiente','en_transito','entregado','devuelto')
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Estados desconocidos alteran tasas y tiempos.
+- nombre: tracking_identificado
+  condicion: evento_id IS NOT NULL AND tracking_id IS NOT NULL AND fecha_modificacion IS NOT NULL
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: No se puede identificar u ordenar eventos sin esos campos.
+transformaciones_silver:
+- Estandarizar PENDIENTE -> pendiente; Entregado -> entregado; Devuelto -> devuelto; En transito, EN_CAMINO, en_transito,
+  En camino -> en_transito.
+- Estandarizar SERVIENTREGA -> Servientrega; Shalom -> Shalom; Olva Courier y Olva -> Olva.
+- Eliminar mensajes reprocesados por (tracking_id, estado_entrega, fecha_modificacion), reteniendo menor evento_id;
+  validar llave de deduplicación contra los datos.
+- 'Conservar eventos por tracking_id: evento_id es llave del conector, nunca tracking_id.'
+- Validar venta_id contra Silver ventas; cuarentenar huérfanos según política propuesta.
+problemas_conocidos:
+- problema: mensajes reprocesados
+  ejemplo: mismo cambio con evento_id distinto
+  filas_afectadas: pendiente_de_consulta_sql
+  tratamiento: deduplicar por identidad de evento de negocio
+- problema: estado inconsistente
+  ejemplo: 'PENDIENTE: 5362; Entregado: 4180; En transito: 1341; EN_CAMINO: 1341; en_transito: 1324; En camino:
+    1307; Devuelto: 284'
+  filas_afectadas: 15139
+  tratamiento: normalizar siete variantes a cuatro estados
+- problema: nombres de courier inconsistentes
+  ejemplo: 'SERVIENTREGA: 5084; Shalom: 5011; Olva Courier: 3762; Olva: 1282'
+  filas_afectadas: 15139
+  tratamiento: normalizar cuatro variantes a tres couriers
+- problema: fecha_actualizacion nula
+  ejemplo: NULL permitido
+  filas_afectadas: 285
+  tratamiento: conservar nulo
+notas_implementacion:
+- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
+- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'

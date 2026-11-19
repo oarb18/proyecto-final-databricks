@@ -1,0 +1,47 @@
+fuente: sucursales
+version: 1
+ultima_actualizacion: '2026-11-19'
+responsable: operaciones
+llegada: CSV en /Volumes/proyecto_final/default/vol_landing/sucursales/
+metodo_ingesta: 'COPY INTO: un archivo maestro estático'
+frecuencia_esperada: archivo único de referencia; actualización excepcional
+tabla_bronze: proyecto_final.bronze.sucursales
+tabla_silver: proyecto_final.silver.sucursales
+llave: sucursal_id
+columnas:
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+- nombre: nombre_sucursal
+  tipo: string
+  nulo: false
+- nombre: distrito
+  tipo: string
+  nulo: false
+- nombre: ciudad
+  tipo: string
+  nulo: false
+- nombre: region
+  tipo: string
+  nulo: false
+- nombre: fecha_apertura
+  tipo: date
+  nulo: false
+reglas_de_calidad:
+- nombre: sucursal_identificada
+  condicion: sucursal_id IS NOT NULL AND nombre_sucursal IS NOT NULL AND ciudad IS NOT NULL
+  politica: drop
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Clave y ubicación son necesarias para agrupaciones.
+transformaciones_silver:
+- Convertir fecha_apertura a date.
+- Normalizar ciudad a título y armonizar Huanuco -> Huánuco.
+- Deduplicar por sucursal_id; conservar las 40 sucursales.
+problemas_conocidos:
+- problema: casing inconsistente en ciudad
+  ejemplo: AREQUIPA y PIURA
+  filas_afectadas: 2
+  tratamiento: normalizar ciudad
+notas_implementacion:
+- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
+- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'

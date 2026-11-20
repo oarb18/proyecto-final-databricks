@@ -1,13 +1,15 @@
 fuente: sucursales
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 3
+ultima_actualizacion: '2026-11-20'
 responsable: operaciones
 llegada: CSV en /Volumes/proyecto_final/default/vol_landing/sucursales/
 metodo_ingesta: 'COPY INTO: un archivo maestro estático'
 frecuencia_esperada: archivo único de referencia; actualización excepcional
 tabla_bronze: proyecto_final.bronze.sucursales
 tabla_silver: proyecto_final.silver.sucursales
+tabla_cuarentena: proyecto_final.silver.cuarentena
 llave: sucursal_id
+
 columnas:
 - nombre: sucursal_id
   tipo: string
@@ -27,21 +29,79 @@ columnas:
 - nombre: fecha_apertura
   tipo: date
   nulo: false
+
 reglas_de_calidad:
-- nombre: sucursal_identificada
-  condicion: sucursal_id IS NOT NULL AND nombre_sucursal IS NOT NULL AND ciudad IS NOT NULL
-  politica: drop
+- nombre: campos_obligatorios
+  condicion: >
+    sucursal_id IS NOT NULL AND TRIM(sucursal_id) <> ''
+    AND nombre_sucursal IS NOT NULL AND TRIM(nombre_sucursal) <> ''
+    AND distrito IS NOT NULL AND TRIM(distrito) <> ''
+    AND ciudad IS NOT NULL AND TRIM(ciudad) <> ''
+    AND region IS NOT NULL AND TRIM(region) <> ''
+    AND fecha_apertura IS NOT NULL
+  politica: cuarentena
   destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Clave y ubicación son necesarias para agrupaciones.
+  justificacion: Los campos obligatorios son necesarios para identificar y analizar las sucursales.
+
+- nombre: fecha_apertura_valida
+  condicion: fecha_apertura >= DATE '1900-01-01' AND fecha_apertura <= CURRENT_DATE()
+  politica: cuarentena
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: No se permiten fechas futuras ni anteriores al rango establecido.
+
+- nombre: sucursal_unica
+  condicion: Una sola fila por sucursal_id normalizado
+  politica: cuarentena
+  destino_rechazos: proyecto_final.silver.cuarentena
+  justificacion: Las claves duplicadas deben identificarse y los registros excedentes enviarse a cuarentena.
+
 transformaciones_silver:
-- Convertir fecha_apertura a date.
-- Normalizar ciudad a título y armonizar Huanuco -> Huánuco.
-- Deduplicar por sucursal_id; conservar las 40 sucursales.
+- Eliminar espacios al inicio y final de los campos de texto.
+- Normalizar ciudad a formato título.
+- Armonizar Huanuco -> Huánuco.
+- Mantener fecha_apertura como DATE.
+- Validar campos obligatorios y rango de fechas.
+- Deduplicar por sucursal_id priorizando fecha_ingesta más reciente y aplicando criterios adicionales de desempate.
+- Enviar registros inválidos o duplicados excedentes a la tabla compartida de cuarentena.
+- Conservar los datos originales en formato JSON y registrar el motivo del rechazo.
+- Conservar los 40 registros válidos esperados.
+
 problemas_conocidos:
 - problema: casing inconsistente en ciudad
   ejemplo: AREQUIPA y PIURA
   filas_afectadas: 2
   tratamiento: normalizar ciudad
+
+- problema: ciudad sin tilde
+  ejemplo: Huanuco
+  filas_afectadas: 1
+  tratamiento: corregir a Huánuco
+
+validacion_bronze:
+  total_registros: 40
+  sucursales_distintas: 40
+  campos_obligatorios_invalidos: 0
+  fechas_futuras: 0
+  fechas_fuera_rango: 0
+  fecha_minima: '2008-01-07'
+  fecha_maxima: '2024-07-18'
+  ciudades_distintas: 16
+  registros_a_normalizar: 3
+
+validacion_silver:
+  total_registros: 40
+  sucursales_distintas: 40
+  ciudades_distintas: 14
+  registros_duplicados: 0
+  registros_rechazados: 0
+  registros_enviados_cuarentena: 0
+  fecha_minima: '2008-01-07'
+  fecha_maxima: '2024-07-18'
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+- Los conteos corresponden a las validaciones realizadas el 2026-11-20.
+- Las reglas de calidad se implementaron en el notebook 08_silver_sucursales.
+- Los registros rechazados deben conservar sus datos originales y motivos de rechazo.
+- Las correcciones de formato no generan rechazos cuando el valor puede normalizarse.
+- La cuarentena utiliza una tabla compartida para todas las fuentes.
+- Bronze permanece sin modificaciones.

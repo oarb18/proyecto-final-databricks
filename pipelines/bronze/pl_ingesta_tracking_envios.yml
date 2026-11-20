@@ -1,0 +1,43 @@
+# ============================================================
+# PROYECTO FINAL - ELECTROCASA
+# CAPA BRONZE: INGESTA INCREMENTAL DESDE AZURE SQL SERVER
+#
+# Tecnologia: Databricks Lakeflow Connect
+# Conector: Query-based mediante Unity Catalog Federation
+# Origen: Azure SQL Database - electrocasadb.dbo.trackingenvios
+# Destino: proyecto_final.bronze.tracking_envios
+# ============================================================
+
+resources:
+  pipelines:
+    pl_ingesta_tracking_envios:
+      name: pl_ingesta_tracking_envios
+
+      catalog: proyecto_final
+      schema: default
+
+      channel: PREVIEW
+      photon: true
+      pipeline_type: MANAGED_INGESTION
+
+      ingestion_definition:
+        source_type: FOREIGN_CATALOG
+        ingest_from_uc_foreign_catalog: true
+
+        objects:
+          - table:
+              source_catalog: conexion_azure_sql_electrocasa_catalog
+              source_schema: dbo
+              source_table: trackingenvios
+
+              destination_catalog: proyecto_final
+              destination_schema: bronze
+              destination_table: tracking_envios
+
+              table_configuration:
+                primary_keys:
+                  - evento_id
+
+                query_based_connector_config:
+                  cursor_columns:
+                    - fecha_modificacion

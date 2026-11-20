@@ -1,79 +1,332 @@
 fuente: catalogo
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 3
+ultima_actualizacion: '2026-11-20'
 responsable: area_productos
+
 llegada: JSON en /Volumes/proyecto_final/default/vol_landing/catalogo/
 metodo_ingesta: 'COPY INTO: dos snapshots completos poco frecuentes, multiLine=true y primitivesAsString=true'
 frecuencia_esperada: snapshots marzo y agosto 2026
 tipo_entrega: snapshot completo
+
 tabla_bronze: proyecto_final.bronze.catalogo
 tabla_silver: proyecto_final.silver.catalogo
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
 llave: producto_id
-historizacion: último snapshot por producto, conservando activo=false; snapshot previo trazable en Bronze
+
+historizacion: último snapshot completo disponible como dimensión vigente; conservar activo=false y mantener snapshots anteriores en Bronze
+
 columnas:
-- nombre: producto_id
-  tipo: string
-  nulo: false
-- nombre: nombre_producto
-  tipo: string
-  nulo: false
-- nombre: categoria
-  tipo: string
-  nulo: false
-  valores_permitidos:
-  - linea_blanca
-  - cocina
-  - electronica
-  - climatizacion
-  - entretenimiento
-- nombre: marca
-  tipo: string
-  nulo: true
-- nombre: precio_lista
-  tipo: decimal(12,2)
-  nulo: false
-  regla: numérico mayor a 0
-- nombre: activo
-  tipo: boolean
-  nulo: false
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+
+  - nombre: nombre_producto
+    tipo: string
+    nulo: false
+
+  - nombre: categoria
+    tipo: string
+    nulo: false
+    valores_permitidos:
+      - linea_blanca
+      - cocina
+      - electronica
+      - climatizacion
+      - entretenimiento
+
+  - nombre: marca
+    tipo: string
+    nulo: true
+
+  - nombre: precio_lista
+    tipo: decimal(12,2)
+    nulo: false
+    regla: numérico mayor a 0
+
+  - nombre: activo
+    tipo: boolean
+    nulo: false
+
+  - nombre: fecha_snapshot
+    tipo: date
+    nulo: false
+
 reglas_de_calidad:
-- nombre: precio_valido
-  condicion: precio_lista IS NOT NULL AND precio_lista > 0
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: El precio inválido impide análisis confiable del catálogo.
-- nombre: producto_identificado
-  condicion: producto_id IS NOT NULL AND categoria IS NOT NULL
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: La llave y categoría son indispensables para joins y reseñas.
+  - nombre: producto_identificado
+    condicion: producto_id IS NOT NULL AND TRIM(producto_id) <> ''
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: El identificador es obligatorio para relacionar productos con ventas y reseñas.
+
+  - nombre: nombre_producto_valido
+    condicion: nombre_producto IS NOT NULL AND TRIM(nombre_producto) <> ''
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: El nombre permite identificar comercialmente el producto.
+
+  - nombre: categoria_valida
+    condicion: categoria IN ('linea_blanca', 'cocina', 'electronica', 'climatizacion', 'entretenimiento')
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: Las categorías deben pertenecer a los cinco valores oficiales después de normalizarlas.
+
+  - nombre: precio_valido
+    condicion: precio_lista IS NOT NULL AND precio_lista > 0
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: Los precios nulos, no convertibles o no positivos no son confiables para los indicadores de negocio.
+
+  - nombre: estado_valido
+    condicion: activo IS NOT NULL
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: El estado comercial debe estar informado.
+
+  - nombre: producto_unico
+    condicion: Una sola fila por producto_id en el snapshot vigente
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: Los registros duplicados excedentes deben identificarse y separarse de la dimensión vigente.
+
 transformaciones_silver:
-- Convertir precio_lista de número o texto S/ 1,299.90 a decimal.
-- Normalizar 17 variantes a linea_blanca, cocina, electronica, climatizacion y entretenimiento.
-- Deduplicar producto_id dentro de cada snapshot de manera determinista, documentando la selección del precio.
-- Conservar productos inactivos con activo=false; seleccionar el último snapshot para la dimensión vigente.
-- Mantener fecha_snapshot derivada del nombre de archivo para orden de versiones.
+  - Eliminar espacios al inicio y final de los campos de texto.
+  - Convertir precio_lista de número o texto con moneda a decimal(
+
+¡Claro, Omar! Te dejo el contrato **`catalogo.yml` completo, actualizado a la versión 3**, para que reemplaces todo el contenido del
+
+Claro, Omar. Te dejo el contrato **`catalogo.yml` completo, actualizado a la versión 3**, listo para copiar y pegar en GitHub o Databricks.
+
+Incluye todas las reglas de calidad, las transformaciones implementadas, los resultados de Bronze y Silver, la cuarentena y la conciliación final.
+
+Reemplaza el contenido actual de `contratos/catalogo.yml` por el siguiente:
+
+```yaml
+fuente: catalogo
+version: 3
+ultima_actualizacion: '2026-11-20'
+responsable: area_productos
+
+llegada: JSON en /Volumes/proyecto_final/default/vol_landing/catalogo/
+metodo_ingesta: 'COPY INTO: dos snapshots completos poco frecuentes, multiLine=true y primitivesAsString=true'
+frecuencia_esperada: snapshots marzo y agosto 2026
+tipo_entrega: snapshot completo
+
+tabla_bronze: proyecto_final.bronze.catalogo
+tabla_silver: proyecto_final.silver.catalogo
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
+llave: producto_id
+historizacion: último snapshot completo disponible como dimensión vigente; conservar activo=false y mantener snapshots anteriores en Bronze
+
+columnas:
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+
+  - nombre: nombre_producto
+    tipo: string
+    nulo: false
+
+  - nombre: categoria
+    tipo: string
+    nulo: false
+    valores_permitidos:
+      - linea_blanca
+      - cocina
+      - electronica
+      - climatizacion
+      - entretenimiento
+
+  - nombre: marca
+    tipo: string
+    nulo: true
+
+  - nombre: precio_lista
+    tipo: decimal(12,2)
+    nulo: false
+    regla: numérico mayor a 0
+
+  - nombre: activo
+    tipo: boolean
+    nulo: false
+
+  - nombre: fecha_snapshot
+    tipo: date
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: producto_identificado
+    condicion: producto_id IS NOT NULL AND TRIM(producto_id) <> ''
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: El identificador es obligatorio para relacionar productos con ventas y reseñas.
+
+  - nombre: nombre_producto_valido
+    condicion: nombre_producto IS NOT NULL AND TRIM(nombre_producto) <> ''
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: El nombre permite identificar comercialmente el producto.
+
+  - nombre: categoria_valida
+    condicion: categoria IN ('linea_blanca', 'cocina', 'electronica', 'climatizacion', 'entretenimiento')
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: Las categorías deben pertenecer a los cinco valores oficiales después de normalizarlas.
+
+  - nombre: precio_valido
+    condicion: precio_lista IS NOT NULL AND precio_lista > 0
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: Los precios nulos, no convertibles o no positivos no son confiables para los indicadores de negocio.
+
+  - nombre: estado_valido
+    condicion: activo IS NOT NULL
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: El estado comercial debe estar informado.
+
+  - nombre: producto_unico
+    condicion: Una sola fila por producto_id en el snapshot vigente
+    politica: cuarentena
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: Los registros duplicados excedentes deben identificarse y separarse de la dimensión vigente.
+
+transformaciones_silver:
+  - Eliminar espacios al inicio y final de los campos de texto.
+  - Convertir precio_lista de número o texto con moneda a decimal(12,2).
+  - Normalizar las 17 variantes de categoria a los cinco valores oficiales.
+  - Obtener fecha_snapshot a partir del nombre del archivo de origen.
+  - Identificar el snapshot más reciente disponible.
+  - Construir la dimensión vigente utilizando el snapshot de agosto de 2026.
+  - No recuperar precios de marzo cuando el precio de agosto sea inválido.
+  - Conservar productos activos e inactivos cuando cumplan las reglas de calidad.
+  - Permitir valores nulos en marca.
+  - Validar campos obligatorios y valores permitidos.
+  - Deduplicar por producto_id dentro del snapshot vigente utilizando un criterio determinista.
+  - Enviar registros inválidos y duplicados excedentes del snapshot vigente a la cuarentena compartida.
+  - Conservar los datos originales en formato JSON y registrar el motivo del rechazo.
+  - Mantener Bronze sin modificaciones.
+
 problemas_conocidos:
-- problema: precio_lista nulo
-  ejemplo: precio_lista=null
-  filas_afectadas: 36
-  tratamiento: cuarentena
-- problema: precio_lista no positivo
-  ejemplo: precio_lista<=0
-  filas_afectadas: 58
-  tratamiento: cuarentena
-- problema: marca nula
-  ejemplo: marca=null
-  filas_afectadas: 94
-  tratamiento: permitir nulo
-- problema: producto repetido en snapshot de marzo
-  ejemplo: 25 productos duplicados
-  filas_afectadas: 25
-  tratamiento: deduplicación determinista
-- problema: categorías variantes
-  ejemplo: Climatización / CLIMATIZACION
-  filas_afectadas: 4705
-  tratamiento: normalizar las 17 variantes; cifra = registros totales, no inválidos
+  - problema: precio_lista nulo
+    ejemplo: precio_lista=null
+    filas_afectadas: 36
+    tratamiento: Enviar a cuarentena los registros afectados del snapshot vigente.
+
+  - problema: precio_lista no positivo
+    ejemplo: precio_lista<=0
+    filas_afectadas: 58
+    tratamiento: Enviar a cuarentena los registros afectados del snapshot vigente.
+
+  - problema: marca nula
+    ejemplo: marca=null
+    filas_afectadas: 94
+    tratamiento: Permitir valores nulos porque marca no es un campo obligatorio.
+
+  - problema: producto repetido en snapshot de marzo
+    ejemplo: 25 registros duplicados excedentes
+    filas_afectadas: 25
+    tratamiento: Documentar los duplicados del snapshot histórico conservado en Bronze.
+
+  - problema: categorías variantes
+    ejemplo: Climatización / CLIMATIZACION
+    filas_afectadas: 4705
+    tratamiento: Normalizar las 17 variantes a cinco categorías oficiales.
+
+validacion_bronze:
+  fecha_validacion: '2026-11-20'
+  total_registros: 4705
+  total_snapshots: 2
+
+  registros_marzo: 2305
+  productos_distintos_marzo: 2280
+
+  registros_agosto: 2400
+  productos_distintos_agosto: 2400
+
+  duplicados_excedentes_marzo: 25
+  duplicados_excedentes_agosto: 0
+
+  identificadores_invalidos: 0
+  nombres_invalidos: 0
+
+  precios_nulos_marzo: 12
+  precios_nulos_agosto: 24
+
+  precios_no_positivos_marzo: 31
+  precios_no_positivos_agosto: 27
+
+  precios_no_convertibles: 0
+
+  marcas_nulas_marzo: 46
+  marcas_nulas_agosto: 48
+
+  estados_nulos: 0
+
+  productos_inactivos_marzo: 0
+  productos_inactivos_agosto: 60
+
+  categorias_distintas: 17
+  categorias_normalizadas_esperadas: 5
+
+  productos_presentes_ambos_snapshots: 2280
+  productos_solo_marzo: 0
+  productos_nuevos_agosto: 120
+
+  productos_precio_invalido_agosto: 51
+  productos_precio_invalido_agosto_con_precio_valido_marzo: 44
+  productos_precio_invalido_agosto_sin_precio_valido_marzo: 7
+
+validacion_silver:
+  fecha_validacion: '2026-11-20'
+  snapshot_vigente: '2026-08-01'
+
+  registros_snapshot_vigente: 2400
+  registros_precio_valido_preliminar: 2349
+
+  total_registros_final: 2349
+  productos_distintos_final: 2349
+  categorias_distintas_final: 5
+
+  productos_activos_final: 2289
+  productos_inactivos_final: 60
+
+  precios_invalidos_final: 0
+  duplicados_excedentes_final: 0
+
+  fecha_snapshot_minima: '2026-08-01'
+  fecha_snapshot_maxima: '2026-08-01'
+
+  registros_rechazados_final: 51
+  registros_enviados_cuarentena: 51
+
+  rechazos_precio_nulo_o_no_convertible: 24
+  rechazos_precio_no_positivo: 27
+
+  total_conciliado: 2400
+  conciliacion_correcta: true
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+  - Los conteos de Bronze corresponden a las validaciones del 2026-11-20.
+  - La dimensión Silver representa el último snapshot completo disponible.
+  - El snapshot vigente corresponde al 2026-08-01.
+  - Los snapshots anteriores permanecen almacenados en Bronze.
+  - Los precios de snapshots anteriores no reemplazan precios inválidos del snapshot vigente.
+  - Los precios inválidos del snapshot vigente se envían a cuarentena.
+  - Los problemas de snapshots históricos se conservan documentados en Bronze.
+  - Los registros rechazados conservan sus datos originales en formato JSON y sus motivos de rechazo.
+  - Las correcciones de formato no generan rechazos cuando el valor puede normalizarse.
+  - La cuarentena utiliza una tabla compartida para todas las fuentes.
+  - Silver catálogo fue creado y validado correctamente el 2026-11-20.
+  - La tabla Silver contiene 2349 productos únicos del snapshot de agosto de 2026.
+  - Se conservaron 2289 productos activos y 60 productos inactivos.
+  - Se normalizaron las categorías a cinco valores oficiales.
+  - No existen precios nulos ni no positivos en Silver.
+  - Se almacenaron 51 registros rechazados en proyecto_final.silver.cuarentena.
+  - Los rechazos corresponden a 24 precios nulos y 27 precios no positivos.
+  - Los datos originales de los registros rechazados se conservan en formato JSON.
+  - La conciliación final fue satisfactoria con 2400 registros del snapshot vigente, 2349 en Silver y 51 en cuarentena.
+  - Los análisis Gold sobre el catálogo comercial vigente deberán filtrar activo = true cuando corresponda.
+  - Para analizar ventas históricas se deberá considerar el contexto temporal del producto.
+  - Bronze permanece sin modificaciones.

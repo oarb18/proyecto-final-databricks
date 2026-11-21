@@ -23,8 +23,7 @@ La arquitectura se organiza en tres capas:
   y controles de calidad.
 - **Gold:** construcción de modelos analíticos e indicadores de negocio.
 
-> **Estado del proyecto:** la ingesta Bronze está implementada.
-> Las capas Silver y Gold se encuentran pendientes de desarrollo.
+> **Estado del proyecto (21/11/2026):** Bronze y las transformaciones manuales de las siete fuentes Silver están implementadas y validadas; Gold y la integración declarativa de extremo a extremo se encuentran pendientes. La documentación de Silver se sustenta en los notebooks `08` a `14` y sus evidencias.
 
 ---
 
@@ -2432,9 +2431,250 @@ versionado el pipeline y constituye
 un componente del futuro despliegue
 automatizado del proyecto.
 
-## 5. Capa Silver
+## 5. Capa Silver: limpieza, calidad e historización
 
-*Pendiente de implementación y documentación.*
+### 5.1 Alcance y arquitectura de Silver
+
+Se implementaron las transformaciones de las **siete fuentes** en el catálogo `proyecto_final`, mediante notebooks PySpark/SQL que leen las tablas `bronze`, aplican reglas de negocio y escriben tablas Delta administradas bajo `silver`. La finalidad es que **Gold consuma datos depurados, tipados y deduplicados**, sin incorporar registros rechazados. Los contratos asociados se mantienen en `contratos/<fuente>.yml`.
+
+> **Alcance de la evidencia:** las transformaciones documentadas se ejecutaron mediante notebooks. Su integración como *Lakeflow Spark Declarative Pipeline* con expectativas `dp.expect`/`CONSTRAINT EXPECT` se abordará en la etapa de automatización; no se presenta como un pipeline ya desplegado. Los datos e historiales de Bronze se conservan.
+
+| Fuente | Notebook | Tabla Silver | Decisión principal |
+|---|---|---|---|
+| Sucursales | `notebooks/08_silver_sucursales` | `proyecto_final.silver.sucursales` | Normalización de ubicación, campos obligatorios y deduplicación por sucursal. |
+| Catálogo | `notebooks/09_silver_catalogo` | `proyecto_final.silver.catalogo` | Último snapshot válido, categorías/precios normalizados, productos inactivos conservados. |
+| Empleados | `notebooks/10_silver_empleados` | `proyecto_final.silver.empleados` | Historia **SCD Tipo 2**, orden cronológico, bloqueo de historiales sin alta fiable y máscaras de datos. |
+| Reseñas | `notebooks/11_silver_resenas` | `proyecto_final.silver.resenas` | Preservación de estructuras anidadas, calidad de calificaciones y deduplicación. |
+| Ventas | `notebooks/12_silver_ventas` | `proyecto_final.silver.ventas` | Normalización monetaria, pagos, referencias y vendedor nulo permitido en ecommerce. |
+| Devoluciones | `notebooks/13_silver_devoluciones` | `proyecto_final.silver.devoluciones` | Validación contra venta Silver y montos de reembolso. |
+| Tracking de envíos | `notebooks/14_silver_tracking_envios` | `proyecto_final.silver.tracking_envios` | Historial de estados por evento, normalización de courier y validación de venta. |
+
+### 5.2 Tabla centralizada de cuarentena
+
+Todos los registros que incumplen las reglas críticas se registran en **`proyecto_final.silver.cuarentena`**. Su estructura es: `fuente STRING`, `clave_registro STRING`, `motivo_rechazo STRING`, `fecha_rechazo TIMESTAMP`, `datos_originales STRING` (JSON del registro Bronze) y `archivo_origen STRING`. En Tracking, cuya fuente es Azure SQL Database, este último campo identifica el sistema `Azure SQL Database - dbo.TrackingEnvios` en lugar de un archivo físico.
+
+**Política adoptada:** cuarentena y trazabilidad, en lugar de descartar filas incorrectas silenciosamente. Las entradas conservan la fuente, la causa del rechazo y los datos originales para revisión/auditoría. Las duplicaciones de negocio se resuelven separadamente por las llaves definidas por fuente. Las políticas declaradas en los YAML deben coincidir con esta implementación: las reglas críticas **envían a cuarentena**, aunque alguna plantilla inicial las denominara `drop`.
+
+**Estado final verificado en la carga de Tracking:**
+
+| Fuente | Filas en cuarentena |
+|---|---:|
+| Catálogo | 51 |
+| Empleados | 181 |
+| Reseñas | 223 |
+| Ventas | 580 |
+| Devoluciones | 265 |
+| Tracking de envíos | 476 |
+| Sucursales | 0 (sin fila de origen en el resumen compartido) |
+| **Total** | **1 776** |
+
+La consulta de control permite volver a verificar los acumulados, sin exponer datos personales:
+
+```sql
+SELECT fuente, COUNT(*) AS rechazados
+FROM proyecto_final.silver.cuarentena
+GROUP BY fuente
+ORDER BY fuente;
+```
+
+**Reejecución:** Ventas, Devoluciones y Tracking reemplazan lógicamente sus entradas previas mediante `DELETE WHERE fuente = ...` y posterior `append`; **ambas instrucciones no son una única transacción atómica**. Empleados usa `overwrite` acotado por `replaceWhere`. Para reproducibilidad en un pipeline automatizado se revisará el comportamiento idempotente, especialmente de las cargas de cuarentena que usan `append` simple.
+
+### 5.3 Sucursales: referencia geográfica normalizada
+
+El notebook `08_silver_sucursales` lee la tabla Bronze, conserva el JSON original para auditoría, aplica `TRIM` a los campos de identificación y ubicación, `INITCAP` al nombre de la ciudad y corrige explícitamente `Huanuco` a `Huánuco`. Se requieren identificador, nombre, distrito, ciudad, región y fecha de apertura no nulos; la fecha debe estar comprendida entre `1900-01-01` y el día de ejecución.
+
+La deduplicación utiliza `ROW_NUMBER() OVER (PARTITION BY sucursal_id ORDER BY fecha_ingesta DESC, ...)`, con criterios adicionales de desempate. Se escribe una fila por sucursal en Delta `silver.sucursales` mediante `overwrite`. Los registros inválidos se etiquetan con `CAMPO_OBLIGATORIO_INVALIDO` o `FECHA_APERTURA_INVALIDA`; los duplicados excedentes con `SUCURSAL_DUPLICADA`. El notebook concilia `total_bronze = total_silver + total_rechazados` antes de guardar. Una consulta adicional identifica nombres de sucursales sin el texto «ElectroCasa», como **control exploratorio**, no como rechazo automático.
+
+**Evidencias:**
+
+![Sucursales: normalización de ciudades](evidencias/silver/sucursales/04_normalizacion_ciudades.png)
+
+![Sucursales: validación de calidad](evidencias/silver/sucursales/01_validacion_calidad.png)
+
+![Sucursales: comprobación de tabla Silver](evidencias/silver/sucursales/03_validacion_silver.png)
+
+![Sucursales: validación de cuarentena](evidencias/silver/sucursales/06_validacion_cuarentena.png)
+
+### 5.4 Catálogo: snapshot vigente y calidad de producto
+
+El notebook `09_silver_catalogo` extrae `fecha_snapshot` del `archivo_origen` y **selecciona la fecha de snapshot más reciente** (agosto de 2026). Los nombres y categorías se limpian con `TRIM`; las categorías se normalizan a minúsculas sin tildes y con guiones bajos. El precio se depura de símbolos monetarios y separadores y se convierte con `TRY_CAST` a `DECIMAL(12,2)`; se rechazan valores nulos, no convertibles o no positivos.
+
+Se validan `producto_id`, `nombre_producto`, categoría entre `linea_blanca`, `cocina`, `electronica`, `climatizacion` y `entretenimiento`, precio positivo y valor no nulo de `activo`. Los productos con `activo = false` **no se excluyen por estar descontinuados**: conservan utilidad para relaciones históricas. Duplicados del mismo `producto_id` se consolidan determinísticamente, reteniendo una sola fila. Los rechazos, incluidos posibles duplicados excedentes, se envían a la cuarentena central.
+
+**Resultado validado del último snapshot:** **2 349 productos Silver y 51 rechazados**. El histórico bruto de Bronze se mantiene sin sustituirlo por el snapshot más reciente. Para la pregunta Gold sobre reseñas, las referencias a productos históricos que solo figuren en Bronze requieren resolver la **última aparición de cada producto** en los snapshots, ya que Silver Catálogo representa exclusivamente el snapshot vigente.
+
+**Evidencias:**
+
+![Catálogo: snapshots](evidencias/silver/catalogo/02_validacion_snapshots.png)
+
+![Catálogo: categorías y precios normalizados](evidencias/silver/catalogo/09_normalizacion_categorias_precios.png)
+
+![Catálogo: validación de calidad](evidencias/silver/catalogo/11_validacion_calidad.png)
+
+![Catálogo: tabla Silver, parte 1](evidencias/silver/catalogo/14a_validacion_silver_parte1.png)
+
+![Catálogo: conciliación final](evidencias/silver/catalogo/17_conciliacion_final_catalogo.png)
+
+### 5.5 Empleados: dimensión histórica SCD Tipo 2 y protección sensible
+
+El notebook `10_silver_empleados` trabaja sobre eventos de alta, transferencia, cambio salarial y baja/cese recibidos en diferentes lotes; normaliza atributos, fechas, salarios y nombres de eventos. Para ordenar correctamente los cambios se utilizan los **campos del origen**: `fecha_evento`, `fecha_registro` y un criterio adicional de archivo, sin sustituir el orden de negocio por `current_timestamp()`. Se comprueban los eventos del mismo día y las llegadas tardías.
+
+Un hallazgo determinante fueron **36 empleados con historial no fiable por alta inicial rechazada**: el notebook bloquea su historial completo (107 eventos relacionados) en vez de generar versiones desde un estado laboral desconocido. Otros problemas de calidad, como fechas no válidas, salarios fuera de regla o DNI vacío, también se clasifican. Los motivos se conservan en `motivo_rechazo_final` y en `silver.cuarentena`.
+
+Para construir SCD2, tras verificar que no hay secuencias inválidas, el código selecciona el último evento del empleado en cada día por `fecha_registro`, ordena los días cronológicamente y construye intervalos `[vigente_desde, vigente_hasta)` mediante `LEAD()`. Calcula `version`, `es_actual` y `activo` y valida ausencia de solapamientos, discontinuidades y más de una versión actual por empleado. Esta granularidad diaria es relevante para las preguntas Gold de plantilla por mes y sucursal histórica de vendedor.
+
+**Resultados documentados:** 4 231 versiones históricas; 1 460 empleados distintos; 1 109 empleados activos actuales; **181 eventos en cuarentena**. Los conteos de eventos Bronze y de versiones SCD2 **no deben sumarse como si fueran una misma granularidad**: el notebook consolida eventos del mismo día en una versión.
+
+En el mismo notebook se crean funciones SQL `proyecto_final.silver.mask_dni` y `proyecto_final.silver.mask_salario`. El `CREATE TABLE ... MASK` aplica esas funciones a `dni` y `salario`: los miembros de `electrocasa_ingenieria` pueden consultar el valor original por `is_account_group_member(...)`; para otros usuarios DNI se presenta como `********` y salario como `NULL`. La declaración de las máscaras **está en el código**, pero la demostración efectiva con usuarios o grupos diferentes y el tratamiento en un pipeline declarativo se documentarán posteriormente junto con gobierno y seguridad.
+
+**Evidencias:**
+
+![Empleados: eventos del mismo día](evidencias/silver/empleados/05a_eventos_mismo_dia.png)
+
+![Empleados: llegadas tardías](evidencias/silver/empleados/06_llegadas_tardias.png)
+
+![Empleados: historiales incompletos a cuarentena](evidencias/silver/empleados/16_cuarentena_por_historial_incompleto.png)
+
+![Empleados: construcción de versiones SCD2](evidencias/silver/empleados/18_construccion_versiones_scd2.png)
+
+![Empleados: integridad SCD2](evidencias/silver/empleados/19_validacion_integridad_scd2.png)
+
+![Empleados: consulta de historial SCD2](evidencias/silver/empleados/21_consulta_historial_scd2.png)
+
+![Empleados: validación de cuarentena](evidencias/silver/empleados/23_validacion_cuarentena_empleados.png)
+
+### 5.6 Reseñas: JSON anidado y controles de calidad
+
+El notebook `11_silver_resenas` trabaja con JSON Lines y mantiene las estructuras útiles para el análisis: `tags` como arreglo de textos, `respuestas` como arreglo de estructuras (autor, texto y fecha) y `metadata` en su representación JSON. Normaliza las fechas, valida `calificacion` entre **1 y 5**, verifica la existencia del producto contra el catálogo y clasifica como inválidas las respuestas de soporte que carezcan de `autor`. Las reseñas duplicadas se deduplican por llave de reseña. La lógica evita eliminar una reseña válida únicamente porque su producto ya no esté en el último snapshot, si existe en snapshots previos del Bronze; esa categoría histórica se resolverá en Gold.
+
+**Conciliación documentada:** 9 280 registros Bronze; 80 filas duplicadas excedentes; **8 977 reseñas Silver**; **223 reseñas en cuarentena**. Los rechazos incluyen 103 calificaciones inválidas, 112 referencias huérfanas y 8 respuestas sin autor; las categorías de error observadas se registran por registro según las validaciones del notebook. El texto de la reseña no se descarta por comodidad de agregación.
+
+**Evidencias:**
+
+![Reseñas: tipos anidados](evidencias/silver/resenas/03b_campos_anidados.png)
+
+![Reseñas: respuestas sin autor](evidencias/silver/resenas/06_respuestas_sin_autor_cuarentena.png)
+
+![Reseñas: conciliación de calidad](evidencias/silver/resenas/11_conciliacion_calidad.png)
+
+![Reseñas: validación de tabla Silver](evidencias/silver/resenas/13_validacion_tabla_silver.png)
+
+![Reseñas: cuarentena](evidencias/silver/resenas/18_validacion_cuarentena.png)
+
+### 5.7 Ventas: importes, canales y referencias
+
+El notebook `12_silver_ventas` parte de tres archivos CSV, conserva el identificador `venta_id`, convierte `monto_total` desde formatos como `1.234,50` y `1234.50` a `DECIMAL(12,2)`, convierte `cantidad` a entero y estandariza las fechas. Mapea **17 escrituras de medio de pago** a `tarjeta`, `efectivo`, `transferencia`, `yape` y `plin`; mantiene los canales `tienda_fisica` y `ecommerce`. El `vendedor_id` **puede ser nulo en ecommerce**, sin invalidar la venta.
+
+Deduplica por `venta_id` usando el orden de ingesta y archivo; verifica sucursales y que cada producto exista en los catálogos considerados, además de importes y cantidades positivos. Las referencias huérfanas o filas críticas se envían a cuarentena con motivos explícitos como `MONTO_INVALIDO`, `CANTIDAD_INVALIDA`, `SUCURSAL_INVALIDA` y `PRODUCTO_HUERFANO` (pueden coexistir en un mismo registro).
+
+**Conciliación:** 18 240 filas Bronze, **240 duplicados excedentes**, 17 420 ventas Silver y 580 rechazos únicos; `18 240 = 240 + 17 420 + 580`. Se aceptaron 5 184 ventas ecommerce y 12 236 de tienda física. La validación incluye ausencia de montos nulos/cantidades inválidas y unicidad de `venta_id`.
+
+**Evidencias:**
+
+![Ventas: distribución por lotes](evidencias/silver/ventas/02_distribucion_lotes.png)
+
+![Ventas: normalización de pagos](evidencias/silver/ventas/04a_normalizacion_pagos.png)
+
+![Ventas: conciliación de calidad](evidencias/silver/ventas/05a_conciliacion_calidad_ventas.png)
+
+![Ventas: consulta de registros Silver](evidencias/silver/ventas/07_consulta_registros_silver_ventas.png)
+
+![Ventas: consulta de cuarentena](evidencias/silver/ventas/10_consulta_registros_cuarentena.png)
+
+### 5.8 Devoluciones: integridad referencial y reembolsos
+
+El notebook `13_silver_devoluciones` lee los tres lotes Bronze, convierte `monto_reembolso` a `DECIMAL(12,2)` y `fecha_devolucion` a `DATE`, deduplica por `devolucion_id` y realiza un `LEFT JOIN` con `silver.ventas`. La validación se efectúa **después del join**, pues requiere comparar el reembolso con `monto_total` de la venta de origen y verificar referencias de sucursal y producto. La ausencia de `motivo` no produce rechazo: se permite el valor nulo.
+
+Las devoluciones se envían a cuarentena por venta huérfana, reembolso negativo/no convertible, reembolso que excede el valor de la venta, fecha inválida o referencias incompatibles. El notebook también evalúa los reembolsos acumulados por venta, para prevenir sumar devoluciones que excedan el importe original; no se detectaron varias devoluciones válidas para una misma venta en el resultado final.
+
+**Conciliación:** 4 217 registros Bronze; 60 filas duplicadas excedentes; **3 892 devoluciones Silver** y **265 rechazadas**. `4 217 = 60 + 3 892 + 265`. Entre las 4 157 devoluciones distintas se identificaron 200 referencias a ventas no presentes en Silver, 38 reembolsos negativos y 29 excesivos (hay solapamiento entre causas); 71 motivos vacíos se aceptan cuando cumplen las demás reglas.
+
+**Evidencias:**
+
+![Devoluciones: análisis de calidad, parte A](evidencias/silver/devoluciones/01a_analisis_calidad_bronze.png)
+
+![Devoluciones: validación de duplicados](evidencias/silver/devoluciones/03_validacion_duplicados.png)
+
+![Devoluciones: reembolsos acumulados](evidencias/silver/devoluciones/04_validacion_reembolsos_acumulados.png)
+
+![Devoluciones: consulta detallada Silver](evidencias/silver/devoluciones/07_consulta_detallada_silver_devoluciones.png)
+
+![Devoluciones: carga de cuarentena](evidencias/silver/devoluciones/09_carga_cuarentena_devoluciones.png)
+
+![Devoluciones: validación final de cuarentena](evidencias/silver/devoluciones/11_validacion_final_cuarentena.png)
+
+### 5.9 Tracking de envíos: historia de eventos de Azure SQL
+
+La ingesta Bronze procede de Azure SQL Database (`dbo.TrackingEnvios`) mediante el conector Lakeflow Connect; la **primera y segunda ejecución y sus evidencias** ya se describen en la sección **4.8**. Silver no reemplaza el historial por una fila por envío: conserva eventos identificados por `evento_id` y deduplica, si aparecieran reprocesamientos, por `(tracking_id, estado_entrega normalizado, fecha_modificacion)` con el menor identificador. En el conjunto validado se encontraron **0 eventos reprocesados**.
+
+El notebook `14_silver_tracking_envios` normaliza **13 variantes originales de estado** a `pendiente`, `en_transito`, `entregado`, `devuelto`, y **10 variantes de nombre de courier** a `Servientrega`, `Shalom` y `Olva`. Cada evento debe tener identificador, `tracking_id`, fecha de modificación, estado reconocido y una venta existente en `silver.ventas`. Se conservan los eventos válidos de envíos parcialmente inconsistentes y se envían los relacionados con ventas huérfanas a cuarentena.
+
+**Conciliación:** **15 139** eventos Bronze; **14 663** eventos Silver (5 184 envíos distintos); **476** eventos huérfanos en cuarentena. `15 139 = 14 663 + 476`. Los análisis previos identificaron 69 envíos con múltiples ventas asociadas en Bronze, pero **0 con más de una venta válida**; 63 envíos tienen mezcla de eventos válidos y huérfanos, y 148 envíos solo eventos huérfanos.
+
+Para Gold se documentan **4 000 envíos** con marcas suficientes para medir el intervalo entre el primer `pendiente` y el primer `entregado`; hay **18 entregas sin `pendiente`**, todas ellas en envíos mixtos, cuyos tiempos **no se inventan**. En 5 332 envíos Bronze, la normalización demostró un solo courier consistente por envío. La tasa de devolución deberá ajustarse exactamente al criterio de la pregunta 6: **envíos que llegaron alguna vez a `devuelto` sobre envíos que llegaron a un estado final (`entregado` o `devuelto`)**, evitando la inclusión de envíos todavía en tránsito.
+
+**Evidencias:**
+
+![Tracking: recuentos Bronze](evidencias/silver/tracking_envios/03a_conteos_iniciales_tracking.png)
+
+![Tracking: estados y couriers](evidencias/silver/tracking_envios/04_variantes_estados_couriers.png)
+
+![Tracking: ventas huérfanas](evidencias/silver/tracking_envios/07_diagnostico_ventas_huerfanas.png)
+
+![Tracking: validación de secuencia, parte A](evidencias/silver/tracking_envios/08a_validacion_secuencia_estados.png)
+
+![Tracking: preparación Silver](evidencias/silver/tracking_envios/11_preparacion_silver_tracking.png)
+
+![Tracking: carga Silver](evidencias/silver/tracking_envios/12_carga_silver_tracking.png)
+
+![Tracking: carga cuarentena](evidencias/silver/tracking_envios/15_carga_cuarentena_tracking.png)
+
+![Tracking: validación final](evidencias/silver/tracking_envios/17_validacion_final_tracking.png)
+
+### 5.10 Conciliaciones, trazabilidad y consultas de comprobación
+
+La siguiente tabla recoge los conteos finales sustentados con los notebooks y las evidencias disponibles, distinguiendo registros Bronze, duplicados de negocio, filas Silver y rechazos. **No se suman versiones SCD2 con eventos Bronze**, porque son granularidades diferentes. En Catálogo solo se procesa en Silver el snapshot más reciente, no todos los snapshots históricos.
+
+| Fuente | Bronze / universo de entrada | Eliminación de duplicados | Salida Silver | Cuarentena |
+|---|---|---|---|---|
+| Sucursales | Referencial de 40 sucursales | Control por `sucursal_id` | 1 fila por sucursal aceptada | 0 en el control final |
+| Catálogo | Último snapshot: 2 400 filas | Deduplicación por `producto_id` | 2 349 productos | 51 |
+| Empleados | Eventos laborales multilote | Consolidación diaria de eventos SCD2 | 4 231 versiones / 1 460 empleados | 181 |
+| Reseñas | 9 280 | 80 duplicados excedentes | 8 977 | 223 |
+| Ventas | 18 240 | 240 duplicados excedentes | 17 420 | 580 |
+| Devoluciones | 4 217 | 60 duplicados excedentes | 3 892 | 265 |
+| Tracking | 15 139 | 0 eventos reprocesados | 14 663 eventos | 476 |
+
+Para verificar las tablas existentes:
+
+```sql
+SELECT 'ventas' fuente, COUNT(*) total FROM proyecto_final.silver.ventas
+UNION ALL SELECT 'devoluciones', COUNT(*) FROM proyecto_final.silver.devoluciones
+UNION ALL SELECT 'resenas', COUNT(*) FROM proyecto_final.silver.resenas
+UNION ALL SELECT 'catalogo', COUNT(*) FROM proyecto_final.silver.catalogo
+UNION ALL SELECT 'sucursales', COUNT(*) FROM proyecto_final.silver.sucursales
+UNION ALL SELECT 'empleados_versiones', COUNT(*) FROM proyecto_final.silver.empleados
+UNION ALL SELECT 'tracking_eventos', COUNT(*) FROM proyecto_final.silver.tracking_envios;
+```
+
+Para auditar rechazos sin reproducir contenido personal en el README:
+
+```sql
+SELECT fuente, motivo_rechazo, COUNT(*) AS registros
+FROM proyecto_final.silver.cuarentena
+GROUP BY fuente, motivo_rechazo
+ORDER BY fuente, registros DESC;
+```
+
+**Controles aún por automatizar:** expectativas declarativas (`dp.expect` o `CONSTRAINT ... EXPECT`), orquestación del job, validación por lote desde el job y verificación de masking con identidades de distintos grupos. Estos requisitos no se consideran satisfechos por las ejecuciones manuales documentadas aquí.
+
+### 5.11 Referencias y criterios de evidencia
+
+- **Código reproducible:** notebooks `08_silver_sucursales` a `14_silver_tracking_envios`.
+- **Contratos:** `contratos/sucursales.yml`, `contratos/catalogo.yml`, `contratos/empleados.yml`, `contratos/resenas.yml`, `contratos/ventas.yml`, `contratos/devoluciones.yml` y `contratos/tracking_envios.yml`.
+- **Capturas:** `evidencias/silver/<fuente>/`. Las rutas de las imágenes en esta sección son **relativas al directorio raíz del repositorio**, para que GitHub pueda mostrarlas.
+- **Seguridad de evidencia:** las capturas elegidas priorizan tablas de control y vistas de auditoría; no se reproducen directamente valores de DNI o salario en el README.
+- **Estado de los enlaces:** los nombres fueron contrastados con las listas de archivos mostradas en las capturas del workspace. La comprobación definitiva de que GitHub **renderiza** las imágenes debe hacerse tras subir este `README.md` al repositorio, ya que las imágenes no están adjuntas como archivos individuales en esta sesión.
 
 ---
 

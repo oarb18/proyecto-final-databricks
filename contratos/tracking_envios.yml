@@ -1,87 +1,585 @@
+
 fuente: tracking_envios
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 2
+ultima_actualizacion: '2026-11-21'
 responsable: courier_externo_y_logistica
+
 llegada: Azure SQL Database, tabla dbo.TrackingEnvios
-metodo_ingesta: Conector query-based de SQL Server (Lakeflow Connect), cursor fecha_modificacion
+metodo_ingesta: >
+  Conector query-based de SQL Server (Lakeflow Connect),
+  utilizando fecha_modificacion como cursor incremental.
+
 connection_unity_catalog: 'PENDIENTE: nombre real de Connection'
 cursor: fecha_modificacion
-modo_historia: 'append only: preservar todos los cambios de estado con evento_id único'
-frecuencia_esperada: incremental por cursor; dos ejecuciones exigidas
+
+modo_historia: >
+  Preservar los cambios de estado como eventos historicos.
+  evento_id identifica cada evento del origen.
+  tracking_id identifica el envio, pero no es una llave
+  unica de evento.
+
+frecuencia_esperada: >
+  Incremental por cursor fecha_modificacion.
+  Se exigen dos ejecuciones de ingesta.
+
 tabla_bronze: proyecto_final.bronze.tracking_envios
 tabla_silver: proyecto_final.silver.tracking_envios
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
 llave: evento_id
+
 depende_de:
-- fuente: ventas
-  columna: venta_id
+  - fuente: ventas
+    columna: venta_id
+    tabla: proyecto_final.silver.ventas
+
 columnas:
-- nombre: evento_id
-  tipo: int
-  nulo: false
-- nombre: tracking_id
-  tipo: string
-  nulo: false
-- nombre: venta_id
-  tipo: string
-  nulo: true
-  regla: venta de origen existente
-- nombre: courier
-  tipo: string
-  nulo: true
-- nombre: estado_entrega
-  tipo: string
-  nulo: true
-  valores_permitidos:
-  - pendiente
-  - en_transito
-  - entregado
-  - devuelto
-- nombre: sucursal_origen
-  tipo: string
-  nulo: true
-- nombre: fecha_actualizacion
-  tipo: date
-  nulo: true
-- nombre: fecha_modificacion
-  tipo: timestamp
-  nulo: false
+  - nombre: evento_id
+    tipo: int
+    nulo: false
+    regla: >
+      Identificador unico de evento.
+      No debe ser nulo.
+
+  - nombre: tracking_id
+    tipo: string
+    nulo: false
+    regla: >
+      Identificador obligatorio del envio.
+      Puede repetirse entre eventos de estados distintos.
+
+  - nombre: venta_id
+    tipo: string
+    nulo: true
+    regla: >
+      Aunque puede llegar nulo desde el origen,
+      para ingresar a Silver debe existir
+      en proyecto_final.silver.ventas.
+
+  - nombre: courier
+    tipo: string
+    nulo: true
+    valores_normalizados:
+      - Servientrega
+      - Shalom
+      - Olva
+    regla: >
+      Normalizar las variantes reconocidas.
+      Conservar NULL si no existe correspondencia,
+      segun el contrato de origen.
+
+  - nombre: estado_entrega
+    tipo: string
+    nulo: true
+    valores_permitidos:
+      - pendiente
+      - en_transito
+      - entregado
+      - devuelto
+    regla: >
+      Todo evento aceptado debe tener un estado
+      reconocido despues de la normalizacion.
+
+  - nombre: sucursal_origen
+    tipo: string
+    nulo: true
+
+  - nombre: fecha_actualizacion
+    tipo: date
+    nulo: true
+    regla: >
+      Se permiten fechas nulas.
+      No se generan fechas artificiales.
+
+  - nombre: fecha_modificacion
+    tipo: timestamp
+    nulo: false
+    regla: >
+      Marca temporal obligatoria para ordenar eventos
+      y realizar ingesta incremental.
+
 reglas_de_calidad:
-- nombre: estado_conocido
-  condicion: estado_entrega IN ('pendiente','en_transito','entregado','devuelto')
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Estados desconocidos alteran tasas y tiempos.
-- nombre: tracking_identificado
-  condicion: evento_id IS NOT NULL AND tracking_id IS NOT NULL AND fecha_modificacion IS NOT NULL
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: No se puede identificar u ordenar eventos sin esos campos.
+  - nombre: evento_identificado
+    condicion: evento_id IS NOT NULL
+    politica: cuarentena
+    motivo_rechazo: EVENTO_ID_INVALIDO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Sin evento_id no se puede identificar
+      ni auditar correctamente el evento del origen.
+
+  - nombre: tracking_identificado
+    condicion: >
+      tracking_id IS NOT NULL
+      AND TRIM(tracking_id) <> ''
+    politica: cuarentena
+    motivo_rechazo: TRACKING_ID_INVALIDO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Sin tracking_id no se puede reconstruir
+      el historial de estados del envio.
+
+  - nombre: fecha_modificacion_valida
+    condicion: fecha_modificacion IS NOT NULL
+    politica: cuarentena
+    motivo_rechazo: FECHA_MODIFICACION_INVALIDA
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      El timestamp permite ordenar cronologicamente
+      los eventos y calcular tiempos de entrega.
+
+  - nombre: estado_conocido
+    condicion: >
+      estado_normalizado IN
+      ('pendiente', 'en_transito', 'entregado', 'devuelto')
+    politica: cuarentena
+    motivo_rechazo: ESTADO_INVALIDO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Los estados desconocidos pueden distorsionar
+      las tasas de devolucion y los tiempos de entrega.
+
+  - nombre: venta_referenciada
+    condicion: >
+      venta_id debe existir en proyecto_final.silver.ventas
+    politica: cuarentena
+    motivo_rechazo: VENTA_HUERFANA
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Solo se aceptan eventos asociados
+      a ventas previamente validadas.
+
+      Los eventos de ventas inexistentes
+      o excluidas de Silver Ventas se conservan
+      en cuarentena con sus datos originales.
+
+  - nombre: evento_negocio_unico
+    condicion: >
+      Una sola fila por
+      (tracking_id, estado_normalizado, fecha_modificacion)
+    politica: deduplicar
+    criterio_desempate: menor evento_id
+    justificacion: >
+      Los mensajes reprocesados no deben producir
+      eventos de negocio duplicados.
+
+      La deduplicacion no se realiza solamente
+      por tracking_id porque se perderia el historial.
+
+normalizacion_estados:
+  valores_salida:
+    - pendiente
+    - en_transito
+    - entregado
+    - devuelto
+
+  equivalencias:
+    pendiente:
+      - PENDIENTE
+      - Pendiente
+      - pendiente
+
+    en_transito:
+      - EN_CAMINO
+      - En transito
+      - en_transito
+      - En camino
+
+    entregado:
+      - ENTREGADO
+      - Entregado
+      - entregado
+
+    devuelto:
+      - DEVUELTO
+      - Devuelto
+      - devuelto
+
+  variantes_originales: 13
+
+  distribucion_normalizada_bronze:
+    pendiente: 5362
+    en_transito: 5313
+    entregado: 4180
+    devuelto: 284
+
+  estados_invalidos_detectados: 0
+
+normalizacion_couriers:
+  valores_salida:
+    - Servientrega
+    - Shalom
+    - Olva
+
+  equivalencias:
+    Servientrega:
+      - SERVIENTREGA
+      - Servientrega
+      - servientrega
+
+    Shalom:
+      - SHALOM
+      - Shalom
+      - shalom
+
+    Olva:
+      - Olva
+      - OLVA COURIER
+      - Olva Courier
+      - olva courier
+
+  variantes_originales: 10
+  couriers_normalizados: 3
+
+  validacion_por_envio:
+    total_envios_bronze: 5332
+    envios_un_courier_normalizado: 5332
+    envios_varios_couriers_normalizados: 0
+    envios_sin_courier_reconocido: 0
+
 transformaciones_silver:
-- Estandarizar PENDIENTE -> pendiente; Entregado -> entregado; Devuelto -> devuelto; En transito, EN_CAMINO, en_transito,
-  En camino -> en_transito.
-- Estandarizar SERVIENTREGA -> Servientrega; Shalom -> Shalom; Olva Courier y Olva -> Olva.
-- Eliminar mensajes reprocesados por (tracking_id, estado_entrega, fecha_modificacion), reteniendo menor evento_id;
-  validar llave de deduplicación contra los datos.
-- 'Conservar eventos por tracking_id: evento_id es llave del conector, nunca tracking_id.'
-- Validar venta_id contra Silver ventas; cuarentenar huérfanos según política propuesta.
+  - >
+    Leer proyecto_final.bronze.tracking_envios
+    conservando los ocho campos del origen.
+
+  - >
+    Normalizar estado_entrega utilizando
+    LOWER y TRIM con las equivalencias definidas.
+
+  - >
+    Normalizar courier a Servientrega, Shalom
+    u Olva utilizando LOWER y TRIM.
+
+  - >
+    Detectar mensajes reprocesados mediante
+    (tracking_id, estado_normalizado,
+    fecha_modificacion).
+
+  - >
+    Si existen mensajes reprocesados,
+    conservar el evento con menor evento_id.
+
+  - >
+    Conservar todos los eventos de estado
+    validos correspondientes a cada tracking_id.
+
+  - >
+    Validar venta_id mediante LEFT JOIN
+    contra proyecto_final.silver.ventas.
+
+  - >
+    Generar motivo_rechazo con todas
+    las condiciones incumplidas.
+
+  - >
+    Mantener fecha_actualizacion nula
+    cuando asi llegue desde el origen.
+
+  - >
+    Seleccionar las ocho columnas
+    definidas en el contrato para Silver.
+
+  - >
+    Enviar eventos invalidos a cuarentena,
+    conservando los datos originales en JSON.
+
+  - >
+    Registrar la procedencia de los rechazos como
+    Azure SQL Database - dbo.TrackingEnvios.
+
+  - >
+    Guardar la tabla Silver en formato Delta.
+    La carga ejecutada en el notebook utiliza
+    overwrite del resultado transformado.
+
+politica_historial:
+  llave_evento: evento_id
+  identificador_envio: tracking_id
+
+  conservar_multiples_eventos_por_envio: true
+  deduplicar_por_tracking_id_solamente: false
+
+  regla: >
+    Un envio puede pasar por pendiente,
+    en_transito, entregado o devuelto.
+
+    Los eventos validos se conservan
+    individualmente para reconstruir su historia.
+
+  eventos_huerfanos: >
+    Enviar a cuarentena los eventos
+    cuya venta_id no existe en Silver Ventas.
+
+    No eliminar automaticamente todos los eventos
+    de un tracking_id cuando solamente algunos
+    tienen referencias invalidas.
+
+  historiales_incompletos: >
+    Los envios que pierden eventos por cuarentena
+    pueden mantener un historial parcial en Silver.
+
+    No se deben reconstruir fechas ni estados
+    inexistentes.
+
 problemas_conocidos:
-- problema: mensajes reprocesados
-  ejemplo: mismo cambio con evento_id distinto
-  filas_afectadas: pendiente_de_consulta_sql
-  tratamiento: deduplicar por identidad de evento de negocio
-- problema: estado inconsistente
-  ejemplo: 'PENDIENTE: 5362; Entregado: 4180; En transito: 1341; EN_CAMINO: 1341; en_transito: 1324; En camino:
-    1307; Devuelto: 284'
-  filas_afectadas: 15139
-  tratamiento: normalizar siete variantes a cuatro estados
-- problema: nombres de courier inconsistentes
-  ejemplo: 'SERVIENTREGA: 5084; Shalom: 5011; Olva Courier: 3762; Olva: 1282'
-  filas_afectadas: 15139
-  tratamiento: normalizar cuatro variantes a tres couriers
-- problema: fecha_actualizacion nula
-  ejemplo: NULL permitido
-  filas_afectadas: 285
-  tratamiento: conservar nulo
+  - problema: eventos de ventas huerfanas
+    eventos_detectados: 476
+    tratamiento: cuarentena por VENTA_HUERFANA
+
+  - problema: tracking asociado a multiples ventas
+    envios_detectados_bronze: 69
+    tratamiento: >
+      Conservar los eventos con ventas validas.
+      Enviar a cuarentena los eventos huerfanos.
+
+  - problema: tracking con mezcla de ventas validas y huerfanas
+    envios_detectados: 63
+    tratamiento: >
+      Conservar eventos validos y documentar
+      la posible perdida de continuidad historica.
+
+  - problema: tracking con solamente eventos huerfanos
+    envios_detectados: 148
+    tratamiento: >
+      Sus eventos no ingresan a Silver
+      mientras no exista una venta de origen valida.
+
+  - problema: mensajes reprocesados
+    eventos_detectados: 0
+    tratamiento: >
+      Mantener la deduplicacion preventiva
+      por identidad de evento de negocio.
+
+  - problema: estado_entrega con variantes de escritura
+    variantes_originales: 13
+    tratamiento: normalizar a cuatro estados
+
+  - problema: courier con variantes de escritura
+    variantes_originales: 10
+    tratamiento: normalizar a tres couriers
+
+  - problema: entregas sin pendiente en Silver
+    envios_detectados: 18
+    tratamiento: >
+      Conservar eventos validos.
+      No calcular tiempos de entrega sin fecha inicial.
+
+  - problema: fecha_actualizacion nula
+    filas_afectadas_exploratorias: 285
+    tratamiento: conservar nulo
+    nota: >
+      Conteo procedente del contrato inicial.
+      No fue recalculado en las validaciones de Silver.
+
+resultados_validacion:
+  total_bronze: 15139
+  eventos_distintos_bronze: 15139
+  envios_distintos_bronze: 5332
+  ventas_distintas_bronze: 5401
+
+  periodo_bronze:
+    primera_modificacion: '2026-03-01T10:19:00'
+    ultima_modificacion: '2026-10-31T23:25:09'
+
+  campos_obligatorios_bronze:
+    eventos_sin_id: 0
+    tracking_id_vacios: 0
+    fechas_modificacion_nulas: 0
+
+  deduplicacion:
+    eventos_reprocesados_detectados: 0
+    eventos_reprocesados_eliminados: 0
+    duplicados_evento_id: 0
+
+  referencias_ventas:
+    eventos_venta_valida: 14663
+    eventos_venta_huerfana: 476
+    eventos_venta_id_vacio: 0
+
+    tracking_con_multiples_ventas_bronze: 69
+    tracking_mixtos: 63
+    tracking_solo_huerfanos: 148
+    tracking_multiples_ventas_validas: 0
+
+  normalizacion:
+    variantes_estado_originales: 13
+    estados_normalizados: 4
+    estados_invalidos: 0
+
+    variantes_courier_originales: 10
+    couriers_normalizados: 3
+    envios_varios_couriers_normalizados: 0
+
+  silver:
+    total_eventos: 14663
+    eventos_distintos: 14663
+    envios_distintos: 5184
+
+  cuarentena:
+    total_eventos: 476
+    eventos_distintos: 476
+    json_originales_nulos: 0
+
+validacion_secuencia_estados:
+  envios_con_eventos_validos: 5184
+  envios_con_pendiente: 5164
+  envios_con_entregado: 4018
+  entregas_con_tiempo_calculable: 4000
+  entregas_sin_pendiente: 18
+  entregas_antes_pendiente: 0
+  envios_con_devolucion: 277
+
+  analisis_historial_incompleto:
+    envios_mixtos: 63
+    entregas_sin_pendiente_en_envios_mixtos: 18
+    entregas_sin_pendiente_no_mixtos: 0
+
+  politica_gold: >
+    Calcular la duracion solamente cuando existan
+    primer_pendiente y primer_entregado
+    y la fecha de entrega sea posterior
+    o igual a la fecha pendiente.
+
+    Los 18 envios sin pendiente se conservan
+    en Silver, pero no aportan al promedio
+    de tiempo de entrega.
+
+cuarentena:
+  tabla: proyecto_final.silver.cuarentena
+  fuente: tracking_envios
+  total_registros: 476
+  eventos_distintos: 476
+
+  motivos:
+    VENTA_HUERFANA: 476
+
+  formato:
+    fuente: string
+    clave_registro: string
+    motivo_rechazo: string
+    fecha_rechazo: timestamp
+    datos_originales: string
+    archivo_origen: string
+
+  clave_registro: >
+    evento_id convertido a string.
+
+  archivo_origen: >
+    Azure SQL Database - dbo.TrackingEnvios
+
+  politica: >
+    Conservar una fila por evento rechazado,
+    incluyendo motivo_rechazo, fecha_rechazo
+    y datos originales en formato JSON.
+
+    No modificar los rechazos correspondientes
+    a las demas fuentes.
+
+conciliacion:
+  total_bronze: 15139
+  eventos_reprocesados_eliminados: 0
+  total_cuarentena: 476
+  total_silver: 14663
+  formula: 15139 = 0 + 476 + 14663
+  estado: validado
+
+uso_en_gold:
+  - pregunta: 6
+    indicador: tiempo_promedio_entrega
+    descripcion: >
+      Calcular las horas transcurridas desde
+      el primer evento pendiente hasta
+      el primer evento entregado de cada envio
+      que tenga ambas marcas temporales.
+
+      Utilizar fecha_modificacion para
+      ordenar los eventos historicos.
+
+      Excluir del calculo de duracion
+      los historiales sin pendiente.
+
+  - pregunta: 6
+    indicador: porcentaje_envios_devueltos
+    descripcion: >
+      Identificar el ultimo estado de cada envio
+      utilizando fecha_modificacion
+      y evento_id como desempate.
+
+      Calcular el porcentaje de devueltos
+      entre envios cuyo estado final
+      sea entregado o devuelto.
+
+      Utilizar el courier normalizado
+      para las agrupaciones por empresa.
+
+  - pregunta: 6
+    indicador: integridad_historial
+    descripcion: >
+      Documentar los envios con eventos
+      enviados a cuarentena y aquellos
+      que tienen historial incompleto.
+
+      No inventar eventos pendientes
+      ni modificar los estados originales.
+
+estado_integracion_origen:
+  origen_declarado: Azure SQL Database
+  tabla_origen: dbo.TrackingEnvios
+
+  connection_unity_catalog: PENDIENTE
+  conector_lakeflow_verificado: false
+  dos_ejecuciones_incrementales_verificadas: false
+
+  nota: >
+    La existencia de datos en Bronze y la correcta
+    transformacion Silver no demuestran por si solas
+    la configuracion de Lakeflow Connect ni
+    las dos ejecuciones incrementales exigidas.
+
+    Se requiere evidencia independiente del conector,
+    la Connection real y sus ejecuciones.
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+  - >
+    Los 15139 eventos fueron evaluados
+    utilizando las reglas del contrato.
+
+  - >
+    Los 476 eventos huerfanos se conservaron
+    en cuarentena, sin eliminarlos sin trazabilidad.
+
+  - >
+    No se detectaron eventos reprocesados
+    con la identidad de negocio evaluada.
+
+  - >
+    El historial de cada tracking_id se mantiene
+    mediante sus diferentes eventos.
+
+  - >
+    No se inventan fechas ni cambios de estado.
+
+  - >
+    Los 18 envios entregados sin pendiente
+    no se incluyen en el promedio de duracion.
+
+  - >
+    Los nombres de courier se normalizaron
+    para evitar separar una misma empresa
+    en distintas categorias.
+
+  - >
+    Silver Ventas debe estar disponible
+    antes de procesar Tracking.
+
+  - >
+    La tabla compartida de cuarentena
+    conserva los registros de otras fuentes.
+
+  - >
+    El README general se actualizara
+    despues de cerrar todas las fuentes Silver.
+
+  - >
+    La configuracion y evidencias definitivas
+    de Lakeflow Connect siguen pendientes.

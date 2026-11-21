@@ -1,95 +1,429 @@
+
 fuente: ventas
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 2
+ultima_actualizacion: '2026-11-21'
 responsable: area_comercial
+
 llegada: CSV en /Volumes/proyecto_final/default/vol_landing/ventas/
 metodo_ingesta: 'Auto Loader: tres lotes incrementales y reingestas'
 frecuencia_esperada: tres lotes marzo-octubre 2026
+
 tabla_bronze: proyecto_final.bronze.ventas
 tabla_silver: proyecto_final.silver.ventas
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
 llave: venta_id
+
 columnas:
-- nombre: venta_id
-  tipo: string
-  nulo: false
-- nombre: sucursal_id
-  tipo: string
-  nulo: false
-- nombre: producto_id
-  tipo: string
-  nulo: false
-  regla: producto del catálogo existente
-- nombre: vendedor_id
-  tipo: string
-  nulo: true
-- nombre: cantidad
-  tipo: int
-  nulo: false
-  regla: mayor a 0
-- nombre: monto_total
-  tipo: decimal(12,2)
-  nulo: false
-  regla: mayor a 0
-- nombre: metodo_pago
-  tipo: string
-  nulo: false
-  valores_permitidos:
-  - tarjeta
-  - efectivo
-  - transferencia
-  - yape
-  - plin
-- nombre: fecha_venta
-  tipo: timestamp
-  nulo: false
-- nombre: canal
-  tipo: string
-  nulo: false
-  valores_permitidos:
-  - tienda_fisica
-  - ecommerce
+  - nombre: venta_id
+    tipo: string
+    nulo: false
+    regla: identificador unico de venta
+
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+    regla: sucursal existente en Silver Sucursales
+
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+    regla: producto existente en Bronze o Silver Catalogo
+
+  - nombre: vendedor_id
+    tipo: string
+    nulo: true
+    regla: >
+      Se permite NULL en ecommerce porque la compra
+      puede realizarse sin intervencion de un vendedor.
+      No se generan vendedores ficticios.
+
+  - nombre: cantidad
+    tipo: int
+    nulo: false
+    regla: mayor a 0
+
+  - nombre: monto_total
+    tipo: decimal(12,2)
+    nulo: false
+    regla: mayor a 0
+
+  - nombre: metodo_pago
+    tipo: string
+    nulo: false
+    valores_permitidos:
+      - tarjeta
+      - efectivo
+      - transferencia
+      - yape
+      - plin
+
+  - nombre: fecha_venta
+    tipo: timestamp
+    nulo: false
+
+  - nombre: canal
+    tipo: string
+    nulo: false
+    valores_permitidos:
+      - tienda_fisica
+      - ecommerce
+
 reglas_de_calidad:
-- nombre: monto_positivo
-  condicion: monto_total IS NOT NULL AND monto_total > 0
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Evita distorsionar las ventas netas.
-- nombre: venta_completa
-  condicion: venta_id IS NOT NULL AND sucursal_id IS NOT NULL AND cantidad > 0 AND fecha_venta IS NOT NULL
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Sin llave, sucursal, unidades o fecha no se pueden calcular indicadores.
+  - nombre: monto_positivo
+    condicion: >
+      monto_decimal IS NOT NULL
+      AND monto_decimal > 0
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: MONTO_INVALIDO
+    justificacion: >
+      Los montos vacios, no convertibles, cero o negativos
+      distorsionan los ingresos y las ventas netas.
+      No se recuperan ni se inventan importes.
+
+  - nombre: cantidad_positiva
+    condicion: >
+      cantidad_int IS NOT NULL
+      AND cantidad_int > 0
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: CANTIDAD_INVALIDA
+    justificacion: >
+      Las cantidades nulas, no convertibles o no positivas
+      afectan los indicadores de unidades vendidas
+      y el ranking de productos.
+
+  - nombre: sucursal_valida
+    condicion: >
+      sucursal_id IS NOT NULL
+      AND TRIM(sucursal_id) <> ''
+      AND sucursal_id existe en Silver Sucursales
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: SUCURSAL_INVALIDA
+    justificacion: >
+      Una venta sin sucursal identificable no puede
+      atribuirse correctamente a una sucursal.
+      En ecommerce se utiliza la sucursal de despacho.
+
+  - nombre: producto_existente
+    condicion: >
+      producto_id IS NOT NULL
+      AND TRIM(producto_id) <> ''
+      AND producto_id existe en Bronze o Silver Catalogo
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: PRODUCTO_HUERFANO
+    justificacion: >
+      Los productos inexistentes en todos los snapshots
+      del catalogo no pueden identificarse confiablemente.
+
+      Se aceptan productos presentes solo en Bronze Catalogo,
+      aunque se hayan excluido de Silver por precios invalidos.
+
+      No se recuperan precios historicos.
+
+  - nombre: fecha_venta_valida
+    condicion: fecha_venta_ts IS NOT NULL
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: FECHA_INVALIDA
+    justificacion: >
+      Sin una fecha valida no es posible calcular
+      los indicadores comerciales por mes.
+
+  - nombre: venta_identificada
+    condicion: >
+      venta_id IS NOT NULL
+      AND TRIM(venta_id) <> ''
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: VENTA_ID_INVALIDO
+    justificacion: >
+      El identificador de venta permite deduplicar
+      y relacionar las transacciones con devoluciones.
+
+  - nombre: metodo_pago_valido
+    condicion: metodo_pago_normalizado IS NOT NULL
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: PAGO_INVALIDO
+    justificacion: >
+      Los metodos de pago deben pertenecer
+      a los cinco valores permitidos.
+
+  - nombre: canal_valido
+    condicion: >
+      canal IN ('tienda_fisica', 'ecommerce')
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    motivo_rechazo: CANAL_INVALIDO
+    justificacion: >
+      El canal permite diferenciar las ventas presenciales
+      de las realizadas por internet.
+
+  - nombre: venta_unica
+    condicion: una sola fila por venta_id
+    politica: deduplicar
+    justificacion: >
+      Las reingestas identicas no deben duplicar
+      importes, cantidades ni indicadores de Gold.
+
 transformaciones_silver:
-- Normalizar importes tanto 1.234,50 como 1234.50 antes de CAST decimal(12,2).
-- Convertir formatos yyyy-MM-dd, dd/MM/yyyy y timestamp ISO con try_to_timestamp.
-- Mapear 17 variantes de pago a tarjeta, efectivo, transferencia, yape y plin.
-- Deduplicar por venta_id con orden determinista de lote y archivo; no descartar vendedor_id nulo en ecommerce.
-- Para producto_id inexistente, enviar a cuarentena (decisión propuesta).
+  - >
+    Normalizar montos con formatos 1.234,50 y 1234.50
+    antes de convertirlos a DECIMAL(12,2).
+
+  - >
+    Convertir cantidad a INT mediante try_cast.
+
+  - >
+    Convertir fecha_venta a TIMESTAMP utilizando
+    formatos tolerantes con try_to_timestamp.
+
+  - >
+    Normalizar 17 variantes de metodo_pago
+    a tarjeta, efectivo, transferencia, yape y plin.
+
+  - >
+    Deduplicar por venta_id usando fecha_ingesta
+    descendente y archivo_origen como desempate.
+
+  - >
+    Mantener vendedor_id nulo para ecommerce.
+    No asignar empleados ficticios.
+
+  - >
+    Validar sucursal_id contra Silver Sucursales.
+
+  - >
+    Validar producto_id contra Bronze y Silver Catalogo.
+    Conservar productos existentes en cualquier snapshot.
+
+  - >
+    No completar montos utilizando precios del catalogo.
+
+  - >
+    Mantener las nueve columnas definidas en el contrato.
+
+  - >
+    Enviar registros invalidos a cuarentena
+    conservando todos los motivos de rechazo
+    y los datos originales de Bronze.
+
+politica_vendedor:
+  ecommerce:
+    vendedor_nulo_permitido: true
+    justificacion: >
+      Las ventas por internet pueden efectuarse directamente
+      por el cliente sin intervencion de un vendedor.
+
+  tienda_fisica:
+    vendedor_identificado: true
+    resultado_bronze_vendedores_nulos: 0
+
+  uso_en_gold: >
+    Para ventas netas se incluyen ambos canales.
+
+    Para ventas por vendedor se utilizan solamente
+    las transacciones de tienda_fisica.
+
+    La sucursal historica del vendedor se obtiene
+    de Silver Empleados SCD Type 2.
+
+    Cuando el vendedor no tiene una version historica
+    vigente, la sucursal del reporte sera SIN_ASIGNAR.
+
+referencias_catalogo:
+  tabla_bronze: proyecto_final.bronze.catalogo
+  tabla_silver: proyecto_final.silver.catalogo
+
+  politica: >
+    Un producto es valido si existe en Bronze Catalogo
+    o Silver Catalogo.
+
+    No se rechaza una venta historica solo porque
+    el producto haya sido excluido de Silver Catalogo
+    debido a un precio invalido.
+
+    El importe de la venta se conserva desde Ventas.
+    No se heredan ni reconstruyen precios historicos.
+
 problemas_conocidos:
-- problema: monto_total vacío
-  ejemplo: monto_total=""
-  filas_afectadas: 152
-  tratamiento: cuarentena por monto_positivo
-- problema: monto_total no positivo
-  ejemplo: monto_total <= 0
-  filas_afectadas: 201
-  tratamiento: cuarentena por monto_positivo
-- problema: venta_id reaparece en lotes
-  ejemplo: venta_id repetido
-  filas_afectadas: 240
-  tratamiento: deduplicar por venta_id
-- problema: producto sin catálogo
-  ejemplo: producto_id no presente en snapshots
-  filas_afectadas: 70
-  tratamiento: cuarentena por referencia huérfana
-- problema: sucursal_id vacío
-  ejemplo: sucursal_id=""
-  filas_afectadas: 105
-  tratamiento: cuarentena por venta_completa
-- problema: cantidad no positiva
-  ejemplo: cantidad=0
-  filas_afectadas: 68
-  tratamiento: cuarentena por venta_completa
+  - problema: monto_total vacio
+    ejemplo: monto_total=""
+    filas_detectadas_bronze: 152
+    tratamiento: cuarentena por MONTO_INVALIDO
+
+  - problema: monto_total no positivo
+    ejemplo: monto_total <= 0
+    filas_detectadas_bronze: 201
+    tratamiento: cuarentena por MONTO_INVALIDO
+
+  - problema: monto invalido tras deduplicacion
+    ventas_unicas_afectadas: 347
+    tratamiento: cuarentena
+
+  - problema: venta_id repetido entre lotes
+    identificadores_repetidos: 235
+    filas_duplicadas_adicionales: 240
+    identificadores_con_contenido_diferente: 0
+    tratamiento: deduplicar
+
+  - problema: producto sin catalogo
+    filas_detectadas_bronze: 70
+    ventas_unicas_afectadas: 70
+    tratamiento: cuarentena por PRODUCTO_HUERFANO
+
+  - problema: sucursal_id vacio
+    filas_detectadas_bronze: 105
+    tratamiento: cuarentena por SUCURSAL_INVALIDA
+
+  - problema: cantidad invalida
+    filas_detectadas_bronze: 68
+    ventas_unicas_afectadas: 66
+    tratamiento: cuarentena por CANTIDAD_INVALIDA
+
+  - problema: vendedor_id nulo
+    filas_detectadas_bronze: 5393
+    canal_afectado: ecommerce
+    tratamiento: permitido sin rechazo
+
+resultados_validacion:
+  total_bronze: 18240
+
+  distribucion_lotes:
+    lote_01: 6783
+    lote_02: 6839
+    lote_03: 4618
+
+  ventas_distintas_bronze: 18000
+  identificadores_repetidos: 235
+  duplicados_eliminados: 240
+  ventas_unicas_evaluadas: 18000
+
+  validaciones_bronze:
+    venta_id_vacio: 0
+    sucursal_vacia: 105
+    producto_vacio: 0
+    monto_vacio: 152
+    vendedores_nulos: 5393
+    montos_no_positivos: 201
+    cantidades_invalidas: 68
+    fechas_invalidas: 0
+    productos_huerfanos: 70
+    sucursales_inexistentes: 0
+    pagos_no_normalizados: 0
+
+  validaciones_tras_deduplicacion:
+    montos_invalidos: 347
+    cantidades_invalidas: 66
+    sucursales_invalidas: 105
+    productos_huerfanos: 70
+    fechas_invalidas: 0
+
+  total_cuarentena: 580
+  total_silver: 17420
+  ventas_distintas_silver: 17420
+
+  monto_total_silver: 77449986.29
+
+  ventas_por_canal:
+    ecommerce:
+      ventas_aceptadas: 5184
+      monto_total: 22722188.49
+
+    tienda_fisica:
+      ventas_aceptadas: 12236
+      monto_total: 54727797.80
+
+  metodos_pago_normalizados:
+    efectivo: 3663
+    plin: 3752
+    tarjeta: 3642
+    transferencia: 3572
+    yape: 3611
+
+  validaciones_silver:
+    montos_nulos: 0
+    cantidades_invalidas: 0
+    venta_id_duplicados: 0
+
+cuarentena:
+  tabla: proyecto_final.silver.cuarentena
+  fuente: ventas
+  total_registros: 580
+  ventas_distintas: 580
+  registros_sin_datos_originales: 0
+
+  motivos:
+    MONTO_INVALIDO: 341
+    SUCURSAL_INVALIDA: 99
+    PRODUCTO_HUERFANO: 68
+    CANTIDAD_INVALIDA: 64
+    MONTO_INVALIDO_SU​CURSAL_INVALIDA: 5
+    SUCURSAL_INVALIDA_PRODUCTO_HUERFANO: 1
+    MONTO_INVALIDO_CANTIDAD_INVALIDA: 1
+    CANTIDAD_INVALIDA_PRODUCTO_HUERFANO: 1
+
+  nota_motivos: >
+    Los motivos combinados corresponden a registros
+    con mas de una regla incumplida.
+    En la tabla fisica los motivos estan separados
+    por coma y espacio.
+
+  politica: >
+    Conservar una sola fila por venta rechazada,
+    incluyendo todos los motivos de rechazo.
+
+    Guardar los datos originales en formato JSON
+    y el archivo de origen.
+
+    Los registros de otras fuentes de cuarentena
+    deben conservarse sin modificaciones.
+
+conciliacion:
+  total_bronze: 18240
+  duplicados_eliminados: 240
+  total_cuarentena: 580
+  total_silver: 17420
+  formula: 18240 = 240 + 580 + 17420
+  estado: validado
+
+uso_en_gold:
+  - pregunta: 1
+    indicador: ventas_netas_por_sucursal_mes
+    descripcion: >
+      Sumar monto_total de tienda_fisica y ecommerce
+      por sucursal y mes de fecha_venta.
+
+      Posteriormente restar devoluciones
+      segun mes de fecha_devolucion.
+
+  - pregunta: 2
+    indicador: top_productos_vendidos
+    descripcion: >
+      Sumar cantidad por producto_id
+      y relacionar con Devoluciones.
+
+  - pregunta: 4
+    indicador: ventas_por_vendedor
+    descripcion: >
+      Considerar solamente tienda_fisica.
+
+      Relacionar vendedor_id con el historial SCD2
+      de Empleados para obtener la sucursal vigente
+      en la fecha de la venta.
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+  - Los conteos exploratorios de Bronze pueden solaparse.
+  - La deduplicacion se realiza antes de aplicar las reglas de rechazo.
+  - Las 240 filas duplicadas son reingestas de contenido identico.
+  - No se generan ventas ni vendedores ficticios.
+  - Los vendedores nulos de ecommerce se conservan.
+  - Los montos invalidos no se reconstruyen desde Catalogo.
+  - Los registros de cuarentena conservan su contenido original.
+  - Los indicadores de Gold utilizan solamente registros validos de Silver.
+  - El README general se actualizara al completar todas las fuentes Silver.
+  - La integracion definitiva con Lakeflow sigue pendiente.

@@ -1,75 +1,384 @@
+
 fuente: devoluciones
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 2
+ultima_actualizacion: '2026-11-21'
 responsable: postventa
+
 llegada: CSV en /Volumes/proyecto_final/default/vol_landing/devoluciones/
 metodo_ingesta: 'Auto Loader: tres lotes incrementales'
-frecuencia_esperada: tres lotes marzo-octubre
+frecuencia_esperada: tres lotes marzo-octubre 2026
+
 tabla_bronze: proyecto_final.bronze.devoluciones
 tabla_silver: proyecto_final.silver.devoluciones
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
 llave: devolucion_id
+
 depende_de:
-- fuente: ventas
-  columna: venta_id
+  - fuente: ventas
+    columna: venta_id
+    tabla: proyecto_final.silver.ventas
+
 columnas:
-- nombre: devolucion_id
-  tipo: string
-  nulo: false
-- nombre: venta_id
-  tipo: string
-  nulo: false
-  regla: venta de origen existente
-- nombre: sucursal_id
-  tipo: string
-  nulo: false
-- nombre: producto_id
-  tipo: string
-  nulo: false
-- nombre: motivo
-  tipo: string
-  nulo: true
-- nombre: monto_reembolso
-  tipo: decimal(12,2)
-  nulo: false
-  regla: entre 0 y monto_total de la venta
-- nombre: fecha_devolucion
-  tipo: date
-  nulo: false
+  - nombre: devolucion_id
+    tipo: string
+    nulo: false
+    regla: identificador unico de devolucion
+
+  - nombre: venta_id
+    tipo: string
+    nulo: false
+    regla: venta de origen existente en Silver Ventas
+
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+    regla: sucursal correspondiente a la venta original
+
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+    regla: producto correspondiente a la venta original
+
+  - nombre: motivo
+    tipo: string
+    nulo: true
+    regla: >
+      Se permiten valores nulos o vacios.
+      No constituyen un motivo de rechazo.
+
+  - nombre: monto_reembolso
+    tipo: decimal(12,2)
+    nulo: false
+    regla: >
+      Debe ser mayor o igual a cero y menor
+      o igual al monto_total de la venta original.
+
+  - nombre: fecha_devolucion
+    tipo: date
+    nulo: false
+    regla: >
+      Fecha valida y no anterior a la fecha
+      de la venta original.
+
 reglas_de_calidad:
-- nombre: reembolso_valido
-  condicion: monto_reembolso >= 0 AND monto_reembolso <= monto_venta_origen
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: No contabilizar reembolsos negativos ni superiores a venta; evaluar después de join con Silver
-    ventas.
-- nombre: devolucion_referenciada
-  condicion: devolucion_id IS NOT NULL AND venta_id IS NOT NULL AND monto_venta_origen IS NOT NULL
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: La devolución requiere venta origen verificable.
+  - nombre: devolucion_identificada
+    condicion: >
+      devolucion_id IS NOT NULL
+      AND TRIM(devolucion_id) <> ''
+    politica: cuarentena
+    motivo_rechazo: DEVOLUCION_ID_INVALIDO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Cada devolucion necesita un identificador
+      para deduplicacion y trazabilidad.
+
+  - nombre: devolucion_referenciada
+    condicion: >
+      venta_id debe existir en proyecto_final.silver.ventas
+    politica: cuarentena
+    motivo_rechazo: VENTA_HUERFANA
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      La devolucion requiere una venta de origen
+      validada para calcular correctamente el reembolso.
+
+      No se recuperan artificialmente ventas
+      que fueron rechazadas durante Silver Ventas.
+
+  - nombre: reembolso_valido
+    condicion: >
+      monto_decimal IS NOT NULL
+      AND monto_decimal >= 0
+    politica: cuarentena
+    motivo_rechazo: REEMBOLSO_INVALIDO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Los importes nulos, no convertibles o negativos
+      no se contabilizan como devoluciones validas.
+
+      Un importe negativo podria representar una reversa
+      contable, pero el origen no proporciona una
+      clasificacion que permita identificarla.
+
+      No se modifican los importes originales.
+
+  - nombre: reembolso_no_excesivo
+    condicion: >
+      monto_decimal <= monto_venta
+    politica: cuarentena
+    motivo_rechazo: REEMBOLSO_EXCESIVO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Un reembolso individual no puede superar
+      el monto_total de su venta original.
+
+      La validacion se realiza despues del JOIN
+      con Silver Ventas.
+
+  - nombre: fecha_devolucion_valida
+    condicion: fecha_date IS NOT NULL
+    politica: cuarentena
+    motivo_rechazo: FECHA_INVALIDA
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Se necesita una fecha valida para calcular
+      los reembolsos correspondientes a cada mes.
+
+  - nombre: sucursal_consistente
+    condicion: >
+      sucursal_id IS NOT NULL
+      AND TRIM(sucursal_id) <> ''
+      AND sucursal_id coincide con sucursal_id de la venta
+    politica: cuarentena
+    motivo_rechazo: SUCURSAL_INVALIDA
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      La devolucion debe estar asociada
+      a la misma sucursal registrada en su venta original.
+
+  - nombre: producto_consistente
+    condicion: >
+      producto_id IS NOT NULL
+      AND TRIM(producto_id) <> ''
+      AND producto_id coincide con producto_id de la venta
+    politica: cuarentena
+    motivo_rechazo: PRODUCTO_INVALIDO
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Evita atribuir una devolucion a un producto
+      diferente del registrado en la venta original.
+
+  - nombre: fecha_posterior_venta
+    condicion: >
+      fecha_date >= CAST(fecha_venta_ref AS DATE)
+    politica: cuarentena
+    motivo_rechazo: FECHA_ANTERIOR_VENTA
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Una devolucion no puede realizarse
+      antes de la fecha de su venta original.
+
+  - nombre: devolucion_unica
+    condicion: una sola fila por devolucion_id
+    politica: deduplicar
+    justificacion: >
+      Las reingestas identicas no deben duplicar
+      reembolsos ni alterar los indicadores de Gold.
+
+politica_motivo:
+  permite_nulo: true
+  permite_vacio: true
+  genera_rechazo: false
+  justificacion: >
+    La ausencia del motivo no impide identificar
+    la devolucion, su venta de origen ni su importe.
+
 transformaciones_silver:
-- Convertir monto_reembolso a decimal(12,2) y fecha_devolucion a date.
-- Enriquecer primero con ventas Silver por venta_id para crear monto_venta_origen, y luego evaluar reembolso_valido
-  en la vista enriquecida.
-- Deduplicar devolucion_id a través de lotes; cuarentenar venta_id huérfana.
-- motivo vacío permitido pero señalado con advertencia.
+  - >
+    Leer los datos originales desde Bronze Devoluciones
+    conservando archivo_origen y fecha_ingesta
+    para trazabilidad durante el procesamiento.
+
+  - >
+    Convertir monto_reembolso STRING a DECIMAL(12,2)
+    mediante normalizacion y TRY_CAST.
+
+  - >
+    Convertir fecha_devolucion STRING a DATE,
+    admitiendo fechas ISO y formato dd/MM/yyyy.
+
+  - >
+    Deduplicar por devolucion_id utilizando
+    fecha_ingesta descendente y archivo_origen
+    descendente como criterio de desempate.
+
+  - >
+    Enriquecer con Silver Ventas mediante LEFT JOIN
+    por venta_id para obtener monto_venta,
+    sucursal_ref, producto_ref y fecha_venta_ref.
+
+  - >
+    Validar la existencia de la venta original,
+    los importes, las fechas y la consistencia
+    de sucursal_id y producto_id.
+
+  - >
+    Generar motivo_rechazo con todas las reglas
+    incumplidas, separadas por coma y espacio.
+
+  - >
+    Mantener motivo nulo o vacio sin rechazar
+    la devolucion.
+
+  - >
+    Seleccionar solamente las siete columnas
+    del contrato para la tabla Silver.
+
+  - >
+    Enviar los registros invalidos a cuarentena
+    conservando datos originales en JSON,
+    motivo de rechazo y archivo de origen.
+
 problemas_conocidos:
-- problema: reembolso negativo
-  ejemplo: monto_reembolso < 0
-  filas_afectadas: 38
-  tratamiento: cuarentena
-- problema: venta_id vacío
-  ejemplo: venta_id=""
-  filas_afectadas: 35
-  tratamiento: cuarentena
-- problema: motivo vacío
-  ejemplo: motivo=""
-  filas_afectadas: 71
-  tratamiento: permitir con advertencia
-- problema: devolución duplicada
-  ejemplo: devolucion_id repetido
-  filas_afectadas: 60
-  tratamiento: deduplicar
+  - problema: reembolso negativo
+    ejemplo: monto_reembolso menor a cero
+    filas_detectadas_bronze: 38
+    tratamiento: cuarentena por REEMBOLSO_INVALIDO
+
+  - problema: reembolso superior a venta original
+    filas_detectadas_bronze: 29
+    tratamiento: cuarentena por REEMBOLSO_EXCESIVO
+
+  - problema: venta_id vacio
+    ejemplo: venta_id=""
+    filas_detectadas_bronze: 35
+    tratamiento: cuarentena por VENTA_HUERFANA
+
+  - problema: venta no encontrada en Silver Ventas
+    filas_detectadas_bronze: 200
+    tratamiento: cuarentena por VENTA_HUERFANA
+
+  - problema: motivo vacio o nulo
+    filas_detectadas_bronze: 71
+    tratamiento: permitido sin rechazo
+
+  - problema: devolucion_id repetido
+    identificadores_duplicados: 60
+    filas_duplicadas_adicionales: 60
+    duplicados_con_datos_diferentes: 0
+    tratamiento: deduplicar
+
+resultados_validacion:
+  total_bronze: 4217
+  devoluciones_distintas_bronze: 4157
+
+  deduplicacion:
+    identificadores_duplicados: 60
+    filas_duplicadas_eliminadas: 60
+    duplicados_con_datos_diferentes: 0
+    registros_unicos_evaluados: 4157
+
+  calidad_bronze:
+    montos_no_convertibles: 0
+    reembolsos_negativos: 38
+    reembolsos_superiores_venta: 29
+    fechas_invalidas: 0
+    ventas_no_encontradas: 200
+    sucursales_diferentes: 0
+    productos_diferentes: 0
+    devoluciones_anteriores_venta: 0
+    motivos_vacios: 71
+
+  validacion_reembolsos_acumulados:
+    ventas_con_devoluciones_individualmente_validas: 3892
+    ventas_con_multiples_devoluciones_validas: 0
+    ventas_con_exceso_acumulado_valido: 0
+
+  total_silver: 3892
+  devoluciones_distintas_silver: 3892
+
+  total_cuarentena: 265
+  devoluciones_distintas_cuarentena: 265
+  json_originales_nulos: 0
+
+cuarentena:
+  tabla: proyecto_final.silver.cuarentena
+  fuente: devoluciones
+  total_registros: 265
+
+  motivos:
+    VENTA_HUERFANA: 198
+    REEMBOLSO_INVALIDO: 36
+    REEMBOLSO_EXCESIVO: 29
+    "VENTA_HUERFANA, REEMBOLSO_INVALIDO": 2
+
+  formato:
+    fuente: string
+    clave_registro: string
+    motivo_rechazo: string
+    fecha_rechazo: timestamp
+    datos_originales: string
+    archivo_origen: string
+
+  politica: >
+    Conservar una fila por devolucion rechazada
+    despues de la deduplicacion.
+
+    Guardar todos los motivos de rechazo
+    y los datos originales de Bronze en JSON.
+
+    Conservar el archivo de origen.
+
+    No modificar los registros de cuarentena
+    correspondientes a otras fuentes.
+
+conciliacion:
+  total_bronze: 4217
+  duplicados_eliminados: 60
+  total_cuarentena: 265
+  total_silver: 3892
+  formula: 4217 = 60 + 265 + 3892
+  estado: validado
+
+uso_en_gold:
+  - pregunta: 1
+    indicador: ventas_netas_por_sucursal_mes
+    descripcion: >
+      Restar los montos de reembolso validos
+      a las ventas brutas.
+
+      Agrupar los reembolsos por sucursal_id
+      y mes de fecha_devolucion.
+
+      El periodo de la devolucion puede ser diferente
+      del periodo de la venta original.
+
+  - pregunta: 2
+    indicador: tasa_devolucion_por_producto
+    descripcion: >
+      Relacionar las devoluciones validas
+      con las ventas por producto_id.
+
+      Calcular la tasa de devolucion siguiendo
+      la definicion establecida para Gold,
+      evitando duplicidades.
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+  - >
+    Los conteos exploratorios pueden solaparse.
+    Las reglas se aplican despues de deduplicar.
+
+  - >
+    Los 60 registros duplicados tienen contenido
+    de negocio identico.
+
+  - >
+    Los 265 rechazos se almacenan en cuarentena,
+    no se eliminan sin trazabilidad.
+
+  - >
+    Se permiten motivos vacios o nulos.
+
+  - >
+    Los reembolsos negativos no se interpretan
+    automaticamente como reversas contables.
+
+  - >
+    No se modifican ni reconstruyen montos.
+
+  - >
+    Silver Ventas debe estar disponible y validada
+    antes de procesar Silver Devoluciones.
+
+  - >
+    La tabla compartida de cuarentena conserva
+    los registros de las demas fuentes.
+
+  - >
+    El README general se actualizara cuando
+    terminemos todas las fuentes Silver.
+
+  - >
+    La integracion definitiva con Lakeflow
+    sigue pendiente.

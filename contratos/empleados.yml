@@ -1,105 +1,261 @@
 fuente: empleados
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 2
+ultima_actualizacion: '2026-11-20'
 responsable: recursos_humanos
+
 llegada: CSV en /Volumes/proyecto_final/default/vol_landing/empleados/
 metodo_ingesta: 'Auto Loader: eventos incrementales y llegada tardía'
 frecuencia_esperada: tres lotes de eventos
+
 tabla_bronze: proyecto_final.bronze.empleados
 tabla_silver: proyecto_final.silver.empleados
-llave_evento: (id_empleado, fecha_evento, fecha_registro, tipo_evento); comprobar colisiones exactas
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
+llave: id_empleado
 llave_entidad: id_empleado
+llave_evento: (id_empleado, fecha_evento, fecha_registro, tipo_evento)
+
 historizacion:
   tipo: SCD Type 2
-  implementacion: intervalos derivados con ventanas y reconstrucción por cada lote
+  implementacion: intervalos derivados con ventanas y reconstruccion completa
   columnas_de_vigencia:
-  - vigente_desde
-  - vigente_hasta
+    - vigente_desde
+    - vigente_hasta
   orden_de_los_cambios: fecha_evento, fecha_registro, desempate determinista
-  eventos_mismo_dia: ordenar por fecha_registro
-  llegada_tardia: recalcular versiones afectadas por el evento anterior y el siguiente
+  eventos_mismo_dia: conservar el ultimo estado del dia en Silver
+  llegada_tardia: reconstruir la historia en orden cronologico
+  intervalo_vigencia: '[vigente_desde, vigente_hasta)'
+  version_actual: es_actual
+  estado_laboral: activo
+
 columnas:
-- nombre: id_empleado
-  tipo: string
-  nulo: false
-- nombre: nombre
-  tipo: string
-  nulo: false
-- nombre: dni
-  tipo: string
-  nulo: true
-  sensible: true
-  masking: 'mask_dni: solo electrocasa_ingenieria ve el valor real; fallback current_user() documentado'
-- nombre: email
-  tipo: string
-  nulo: true
-- nombre: salario
-  tipo: decimal(12,2)
-  nulo: false
-  regla: entre 500 y 20000; umbral propuesto
-  sensible: true
-  masking: 'mask_salario: solo electrocasa_ingenieria ve el valor real; fallback current_user() documentado'
-- nombre: sucursal_id
-  tipo: string
-  nulo: false
-- nombre: cargo
-  tipo: string
-  nulo: false
-- nombre: tipo_evento
-  tipo: string
-  nulo: false
-  valores_permitidos:
-  - alta
-  - transferencia
-  - cambio_salario
-  - baja
-- nombre: fecha_evento
-  tipo: date
-  nulo: false
-- nombre: fecha_registro
-  tipo: timestamp
-  nulo: false
+  - nombre: id_empleado
+    tipo: string
+    nulo: false
+
+  - nombre: nombre
+    tipo: string
+    nulo: false
+
+  - nombre: dni
+    tipo: string
+    nulo: false
+    sensible: true
+    masking: proyecto_final.silver.mask_dni
+    regla: obligatorio; valores vacios enviados a cuarentena
+
+  - nombre: email
+    tipo: string
+    nulo: true
+
+  - nombre: salario
+    tipo: decimal(12,2)
+    nulo: false
+    regla: entre 500 y 20000
+    sensible: true
+    masking: proyecto_final.silver.mask_salario
+
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+
+  - nombre: cargo
+    tipo: string
+    nulo: false
+
+  - nombre: tipo_evento
+    tipo: string
+    nulo: false
+    valores_permitidos:
+      - alta
+      - transferencia
+      - cambio_salario
+      - baja
+
+  - nombre: fecha_evento
+    tipo: date
+    nulo: false
+
+  - nombre: fecha_registro
+    tipo: timestamp
+    nulo: false
+
+  - nombre: version
+    tipo: integer
+    nulo: false
+
+  - nombre: vigente_desde
+    tipo: date
+    nulo: false
+
+  - nombre: vigente_hasta
+    tipo: date
+    nulo: true
+
+  - nombre: es_actual
+    tipo: boolean
+    nulo: false
+
+  - nombre: activo
+    tipo: boolean
+    nulo: false
+
 reglas_de_calidad:
-- nombre: evento_ubicable
-  condicion: id_empleado IS NOT NULL AND fecha_evento IS NOT NULL
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: No se puede ubicar un evento sin empleado y fecha.
-- nombre: salario_razonable
-  condicion: salario BETWEEN 500 AND 20000
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Salarios fuera de rango distorsionan el historial; umbral propuesto a validar.
+  - nombre: evento_ubicable
+    condicion: >
+      id_empleado IS NOT NULL
+      AND TRIM(id_empleado) <> ''
+      AND fecha_evento IS NOT NULL
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      No es posible reconstruir un evento historico sin
+      identificador de empleado y fecha efectiva valida.
+
+  - nombre: dni_obligatorio
+    condicion: "dni IS NOT NULL AND TRIM(dni) <> ''"
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      El DNI es un dato critico para identificar al empleado.
+      No se permite reconstruirlo utilizando otros eventos
+      porque no existe garantia suficiente de su validez.
+
+  - nombre: salario_razonable
+    condicion: salario BETWEEN 500 AND 20000
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Los salarios fuera del rango establecido requieren
+      revision de Recursos Humanos.
+      No se modifican ni sustituyen automaticamente.
+
+  - nombre: historial_completo
+    condicion: primer evento aceptado del empleado debe ser alta
+    politica: cuarentena_por_empleado
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Si el alta inicial presenta un error critico, todos los
+      eventos del empleado se envian a cuarentena.
+
+      Conservar solo transferencias, cambios salariales o bajas
+      posteriores generaria un historial SCD Tipo 2 incompleto.
+
+      Esta politica evita inventar fechas de contratacion,
+      recuperar DNI sin validacion o alterar salarios originales.
+
+      Los registros permanecen disponibles hasta que Recursos
+      Humanos proporcione informacion corregida y verificable.
+
+  - nombre: secuencia_temporal
+    condicion: >
+      el historial comienza con alta y no existen eventos
+      incompatibles inmediatamente posteriores a una baja
+    politica: fail
+    justificacion: >
+      Las secuencias inconsistentes deben revisarse antes
+      de construir las versiones historicas.
+
 transformaciones_silver:
-- Normalizar 13 variantes de evento a alta, transferencia, cambio_salario y baja (incluye cese).
-- Ordenar por fecha_evento y luego fecha_registro; para empates exactos añadir desempate determinista por archivo
-  y fila.
-- Reconstruir intervalos SCD2 por empleado para insertar eventos tardíos en posición histórica, usando lead sobre
-  orden temporal.
-- Mantener dni nulo permitido con advertencia; detectar DNI compartido entre distintos id_empleado y derivar a revisión.
-- Preservar salario y dni originales solo para ingeniería mediante máscara en definición de pipeline.
+  - Normalizar 13 variantes de evento a alta, transferencia, cambio_salario y baja.
+  - Convertir fecha_evento a DATE.
+  - Convertir fecha_registro a TIMESTAMP.
+  - Convertir salario a DECIMAL(12,2).
+  - Aplicar validaciones obligatorias de DNI, fecha y salario.
+  - Enviar a cuarentena todos los eventos de empleados con alta inicial rechazada.
+  - Ordenar eventos por fecha_evento y fecha_registro.
+  - Reconstruir historiales incluyendo eventos de llegada tardia.
+  - Consolidar eventos del mismo dia para representar el ultimo estado diario.
+  - Generar intervalos SCD2 mediante funciones de ventana.
+  - Identificar la ultima version mediante es_actual.
+  - Identificar empleados dados de baja mediante activo igual a false.
+  - Mantener vigencias sin superposiciones.
+  - Aplicar mascaras a las columnas dni y salario.
+
+seguridad:
+  grupo_autorizado: electrocasa_ingenieria
+  mascara_dni: proyecto_final.silver.mask_dni
+  mascara_salario: proyecto_final.silver.mask_salario
+  acceso_silver: solo usuarios autorizados
+  acceso_cuarentena: restringido por informacion personal
+  justificacion: >
+    Los miembros de Ingenieria autorizados pueden visualizar
+    los valores reales de DNI y salario.
+
+    Los usuarios no autorizados reciben los valores enmascarados
+    cuando tienen permiso de lectura sobre una tabla protegida.
+
+    La cuarentena contiene datos originales que requieren
+    controles adicionales de acceso.
+
 problemas_conocidos:
-- problema: fecha_evento ausente
-  ejemplo: fecha_evento=""
-  filas_afectadas: 38
-  tratamiento: cuarentena
-- problema: dni vacío
-  ejemplo: dni=""
-  filas_afectadas: 58
-  tratamiento: permitido con advertencia
-- problema: salarios mayores a 20000
-  ejemplo: salario > 20000
-  filas_afectadas: 18
-  tratamiento: cuarentena para revisión
-- problema: mismo DNI en empleados diferentes
-  ejemplo: DNI compartido entre IDs
-  filas_afectadas: 6
-  tratamiento: marcar para auditoría; cifra = DNI distintos
-- problema: más de un evento mismo día
-  ejemplo: id_empleado y fecha_evento repetidos
-  filas_afectadas: 38
-  tratamiento: desempatar por fecha_registro
-llave: id_empleado
+  - problema: fecha_evento ausente o no convertible
+    filas_afectadas: 38
+    tratamiento: cuarentena
+
+  - problema: dni vacio
+    filas_afectadas: 58
+    tratamiento: cuarentena
+
+  - problema: salarios mayores a 20000
+    filas_afectadas: 18
+    tratamiento: cuarentena para revision
+
+  - problema: mismo DNI en empleados diferentes
+    dni_distintos_afectados: 6
+    asociaciones_empleado_dni: 12
+    tratamiento: marcar para auditoria sin corregir automaticamente
+
+  - problema: mas de un evento el mismo dia
+    grupos_detectados_bronze: 38
+    tratamiento: ordenar por fecha_registro y consolidar estado diario
+
+  - problema: eventos de llegada tardia
+    eventos_detectados: 16
+    tratamiento: reconstruir historial por fecha efectiva
+
+  - problema: alta inicial rechazada
+    empleados_afectados: 36
+    altas_dni_vacio: 21
+    altas_fecha_invalida: 11
+    altas_salario_invalido: 4
+    total_eventos_bloqueados: 107
+    eventos_previamente_rechazados: 39
+    eventos_adicionales_cuarentena: 68
+    tratamiento: cuarentena completa por empleado
+
+resultados_validacion:
+  total_bronze: 4448
+  empleados_originales: 1500
+
+  eventos_aceptados: 4267
+  eventos_destinados_cuarentena: 181
+
+  empleados_bloqueados: 36
+  empleados_silver: 1460
+
+  versiones_scd2: 4231
+  versiones_actuales: 1460
+
+  empleados_activos_actuales: 1109
+  empleados_inactivos_actuales: 351
+
+  intervalos_invalidos: 0
+  vigencias_superpuestas: 0
+  vigencias_discontinuas: 0
+  empleados_con_actual_incorrecto: 0
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+  - Los conteos de problemas individuales pueden solaparse.
+  - La conciliacion de calidad es 4448 = 4267 + 181.
+  - Los 36 empleados bloqueados representan 107 eventos en Bronze.
+  - No se inventan DNI, fechas efectivas ni salarios.
+  - Los empleados bloqueados requieren revision de Recursos Humanos.
+  - El SCD2 diario contiene 4231 versiones para 1460 empleados.
+  - Los eventos del mismo dia se consolidan en la version diaria final.
+  - Los intervalos utilizan inicio inclusivo y fin exclusivo.
+  - Las bajas permanecen como ultima version con activo false.
+  - La tabla Silver se construyo y valido mediante el notebook.
+  - La integracion definitiva en Lakeflow sigue pendiente.
+  - La politica de calidad puede afectar la dotacion y ventas historicas de Gold.
+  - El README documentara las decisiones y su impacto en los indicadores.

@@ -1,86 +1,262 @@
+
 fuente: resenas
-version: 1
-ultima_actualizacion: '2026-11-19'
+version: 2
+ultima_actualizacion: '2026-11-20'
 responsable: atencion_cliente
+
 llegada: JSON Lines en /Volumes/proyecto_final/default/vol_landing/resenas/
 metodo_ingesta: 'Auto Loader: JSON Lines incremental con arreglos anidados'
 frecuencia_esperada: dos lotes julio y octubre
+
 tabla_bronze: proyecto_final.bronze.resenas
 tabla_silver: proyecto_final.silver.resenas
+tabla_cuarentena: proyecto_final.silver.cuarentena
+
 llave: resena_id
+
 columnas:
-- nombre: resena_id
-  tipo: string
-  nulo: false
-- nombre: producto_id
-  tipo: string
-  nulo: false
-  regla: producto del catálogo existente
-- nombre: cliente_id
-  tipo: string
-  nulo: false
-- nombre: calificacion
-  tipo: int
-  nulo: false
-  regla: entre 1 y 5
-- nombre: comentario
-  tipo: string
-  nulo: true
-- nombre: tags
-  tipo: array<string>
-  nulo: true
-- nombre: respuestas
-  tipo: array<struct<autor:string,texto:string,fecha:string>>
-  nulo: true
-- nombre: fecha_resena
-  tipo: date
-  nulo: false
-- nombre: metadata
-  tipo: string
-  nulo: true
+  - nombre: resena_id
+    tipo: string
+    nulo: false
+
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+    regla: producto existente en Bronze o Silver Catalogo
+
+  - nombre: cliente_id
+    tipo: string
+    nulo: false
+
+  - nombre: calificacion
+    tipo: int
+    nulo: false
+    regla: entre 1 y 5
+
+  - nombre: comentario
+    tipo: string
+    nulo: true
+
+  - nombre: tags
+    tipo: array<string>
+    nulo: false
+    regla: convertir nulos de Bronze a arreglo vacio
+
+  - nombre: respuestas
+    tipo: array<struct<autor:string,texto:string,fecha:string>>
+    nulo: true
+    regla: las respuestas existentes deben tener autor informado
+
+  - nombre: fecha_resena
+    tipo: date
+    nulo: false
+
+  - nombre: metadata
+    tipo: string
+    nulo: true
+    regla: conservar como JSON string
+
 reglas_de_calidad:
-- nombre: calificacion_en_escala
-  condicion: calificacion BETWEEN 1 AND 5
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Las calificaciones inválidas alterarían el porcentaje negativo.
-- nombre: resena_identificada
-  condicion: resena_id IS NOT NULL AND producto_id IS NOT NULL AND fecha_resena IS NOT NULL
-  politica: drop
-  destino_rechazos: proyecto_final.silver.cuarentena
-  justificacion: Sin dimensiones no se puede agregar por producto y mes.
+  - nombre: calificacion_en_escala
+    condicion: calificacion BETWEEN 1 AND 5
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Las calificaciones nulas o fuera del rango permitido
+      alteran los indicadores de satisfaccion y el porcentaje
+      de resenas negativas.
+
+  - nombre: resena_identificada
+    condicion: >
+      resena_id IS NOT NULL
+      AND TRIM(resena_id) <> ''
+      AND producto_id IS NOT NULL
+      AND TRIM(producto_id) <> ''
+      AND cliente_id IS NOT NULL
+      AND TRIM(cliente_id) <> ''
+      AND fecha_resena IS NOT NULL
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Los identificadores y la fecha son necesarios para
+      relacionar las resenas con productos, clientes y periodos.
+
+  - nombre: producto_existente
+    condicion: producto_id existe en Bronze o Silver Catalogo
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Las resenas de productos inexistentes en todos los
+      snapshots del catalogo no pueden relacionarse con
+      una categoria de producto verificable.
+
+      Los productos presentes solo en Bronze Catalogo pueden
+      conservarse aunque hayan sido excluidos de Silver
+      por problemas de precio.
+
+      No se recuperan ni se heredan precios historicos.
+
+  - nombre: respuesta_autor_obligatorio
+    condicion: >
+      todas las respuestas existentes deben tener
+      autor no nulo y no vacio
+    politica: drop
+    destino_rechazos: proyecto_final.silver.cuarentena
+    justificacion: >
+      Las respuestas de atencion al cliente requieren
+      un responsable identificado para garantizar
+      trazabilidad y auditoria.
+
+      Si una respuesta carece de autor, se envia
+      la resena completa a cuarentena hasta que
+      Atencion al Cliente corrija el registro.
+
+  - nombre: resena_unica
+    condicion: una sola version por resena_id
+    politica: deduplicar
+    justificacion: >
+      Las repeticiones identicas entre lotes no deben
+      duplicar las opiniones ni alterar los indicadores
+      de Gold.
+
 transformaciones_silver:
-- Convertir fechas con varios formatos de forma tolerante.
-- Mantener tags como array<string>, respuestas como array<struct<autor:string,texto:string,fecha:string>> y metadata
-  como JSON string.
-- Coalesce(tags, array()) en Silver, sin confundir nulo original de Bronze.
-- Deduplicar resena_id entre lotes.
-- Producto huérfano va a cuarentena y no cuenta en Gold; comentario y autor de respuesta pueden faltar.
+  - Convertir calificacion de LONG a INT.
+  - Convertir fecha_resena de STRING a DATE con formatos tolerantes.
+  - Mantener comentario como STRING y permitir valores nulos.
+  - Convertir tags nulos a array<string> vacio.
+  - Convertir respuestas de array<string> JSON a array<struct<autor:string,texto:string,fecha:string>>.
+  - Conservar metadata de tipo STRUCT como JSON string.
+  - Deduplicar resena_id entre lotes usando un orden determinista.
+  - Mantener una sola fila por resena_id en Silver.
+  - Enviar calificaciones invalidas a cuarentena.
+  - Enviar productos huerfanos a cuarentena.
+  - Enviar resenas con respuestas sin autor a cuarentena.
+  - Conservar productos existentes solo en Bronze Catalogo.
+  - No recuperar precios historicos ni modificar Silver Catalogo.
+  - Conservar los datos originales de registros rechazados para auditoria.
+
+referencias_catalogo:
+  tabla_silver: proyecto_final.silver.catalogo
+  tabla_bronze: proyecto_final.bronze.catalogo
+
+  politica: >
+    Se acepta una resena cuando su producto existe
+    en Silver Catalogo o en alguno de los snapshots
+    de Bronze Catalogo.
+
+    Un producto que solo aparece en Bronze no se considera
+    huerfano por haber sido excluido de Silver debido
+    a un precio invalido.
+
+  productos_solo_bronze:
+    productos_distintos_detectados: 48
+    resenas_bronze_relacionadas: 199
+    resenas_aceptadas: 196
+    categorias_vacias_detectadas: 0
+
+  validacion_pendiente_gold: >
+    Antes de calcular los indicadores por categoria,
+    verificar la normalizacion y la disponibilidad
+    de la categoria del ultimo snapshot del producto.
+
+    No utilizar precios historicos para reconstruir
+    productos ni completar precios invalidos.
+
 problemas_conocidos:
-- problema: calificación inválida o nula
-  ejemplo: 0, 6, null
-  filas_afectadas: 103
-  tratamiento: cuarentena
-- problema: producto no presente en catálogo
-  ejemplo: producto_id huérfano
-  filas_afectadas: 113
-  tratamiento: cuarentena
-- problema: comentario nulo
-  ejemplo: comentario=null
-  filas_afectadas: 114
-  tratamiento: permitir nulo
-- problema: tags nulo
-  ejemplo: tags=null
-  filas_afectadas: 89
-  tratamiento: normalizar a arreglo vacío
-- problema: resenas repetidas
-  ejemplo: resena_id repetido en otro lote
-  filas_afectadas: 80
-  tratamiento: deduplicar
-- problema: respuesta sin autor
-  ejemplo: autor ausente
-  filas_afectadas: 8
-  tratamiento: advertir sin descartar reseña
+  - problema: calificacion invalida o nula
+    ejemplo: 0, 6, null
+    filas_afectadas_bronze: 103
+    tratamiento: cuarentena
+
+  - problema: producto no presente en ningun catalogo
+    ejemplo: producto_id huerfano
+    filas_detectadas_bronze: 113
+    filas_rechazadas_tras_deduplicacion: 112
+    tratamiento: cuarentena
+
+  - problema: comentario nulo
+    ejemplo: comentario=null
+    filas_detectadas_bronze: 55
+    tratamiento: permitir nulo
+
+  - problema: tags nulo
+    ejemplo: tags=null
+    filas_detectadas_bronze: 89
+    tratamiento: normalizar a arreglo vacio
+
+  - problema: resenas repetidas entre lotes
+    resenas_repetidas: 80
+    filas_duplicadas_adicionales: 80
+    resenas_con_contenido_diferente: 0
+    tratamiento: deduplicar sin enviar a cuarentena
+
+  - problema: respuesta sin autor
+    respuestas_afectadas: 8
+    resenas_distintas_afectadas: 8
+    tratamiento: cuarentena de la resena completa
+
+  - problema: producto presente solo en Bronze Catalogo
+    productos_distintos: 48
+    resenas_aceptadas: 196
+    tratamiento: >
+      Conservar la resena sin recuperar precios historicos.
+      Validar la categoria para los indicadores de Gold.
+
+resultados_validacion:
+  total_bronze: 9280
+
+  lotes:
+    julio_2026: 5292
+    octubre_2026: 3988
+
+  resenas_distintas_bronze: 9200
+  duplicados_eliminados: 80
+
+  resenas_unicas_evaluadas: 9200
+  calificaciones_invalidas: 103
+  fechas_invalidas: 0
+  productos_huerfanos_rechazados: 112
+  resenas_con_respuesta_sin_autor: 8
+
+  total_cuarentena: 223
+  total_silver: 8977
+  resenas_distintas_silver: 8977
+
+  referencias_aceptadas:
+    existe_en_silver_catalogo: 8781
+    solo_en_bronze_catalogo: 196
+
+  respuestas_json:
+    total_respuestas_bronze: 967
+    json_no_convertible: 0
+    respuestas_sin_autor: 8
+    respuestas_sin_texto: 0
+    respuestas_sin_fecha: 0
+
+  estructura_silver:
+    tags_nulos: 0
+    respuestas_nulas: 0
+    metadata_nula: 0
+
+conciliacion:
+  total_bronze: 9280
+  duplicados: 80
+  registros_cuarentena: 223
+  registros_silver: 8977
+  formula: 9280 = 80 + 223 + 8977
+  estado: validado
+
 notas_implementacion:
-- Los conteos de problemas son exploratorios y las categorías pueden solaparse.
-- 'Reglas propuestas: deben implementarse idénticas en el código y verificarse tras cada lote.'
+  - Los problemas detectados en Bronze pueden solaparse.
+  - La deduplicacion se realiza antes de la conciliacion de calidad.
+  - Los 80 duplicados encontrados tienen contenido identico.
+  - Las respuestas sin autor se envian a cuarentena por decision de calidad del proyecto.
+  - El comentario principal puede ser nulo sin rechazar la resena.
+  - Los tags nulos se convierten a arreglos vacios.
+  - Se conserva una sola tabla Silver de resenas.
+  - La informacion anidada se mantiene segun el contrato.
+  - Los datos originales de cuarentena deben conservarse para auditoria.
+  - No se recuperan ni heredan precios historicos de Catalogo.
+  - El calculo final por categoria se validara durante Gold.
+  - La logica del notebook debe integrarse posteriormente en Lakeflow.
+  - El README general se actualizara al finalizar todas las fuentes Silver.

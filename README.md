@@ -23,7 +23,7 @@ La arquitectura se organiza en tres capas:
   y controles de calidad.
 - **Gold:** construcción de modelos analíticos e indicadores de negocio.
 
-> **Estado del proyecto (21/11/2026):** Bronze y las transformaciones manuales de las siete fuentes Silver están implementadas y validadas; Gold y la integración declarativa de extremo a extremo se encuentran pendientes. La documentación de Silver se sustenta en los notebooks `08` a `14` y sus evidencias.
+> **Estado del proyecto (21/11/2026):** las siete fuentes Silver y los **10 modelos analíticos Gold** están construidos y validados. **Se han respondido las seis preguntas de negocio del proyecto** con consultas SQL y evidencias de ejecución. Están pendientes la orquestación declarativa, las pruebas de enmascaramiento por grupo y el despliegue automatizado. Bronze y Silver están documentados en las secciones anteriores; Gold se presenta en la sección 6.
 
 ---
 
@@ -2611,7 +2611,7 @@ El notebook `14_silver_tracking_envios` normaliza **13 variantes originales de e
 
 **Conciliación:** **15 139** eventos Bronze; **14 663** eventos Silver (5 184 envíos distintos); **476** eventos huérfanos en cuarentena. `15 139 = 14 663 + 476`. Los análisis previos identificaron 69 envíos con múltiples ventas asociadas en Bronze, pero **0 con más de una venta válida**; 63 envíos tienen mezcla de eventos válidos y huérfanos, y 148 envíos solo eventos huérfanos.
 
-Para Gold se documentan **4 000 envíos** con marcas suficientes para medir el intervalo entre el primer `pendiente` y el primer `entregado`; hay **18 entregas sin `pendiente`**, todas ellas en envíos mixtos, cuyos tiempos **no se inventan**. En 5 332 envíos Bronze, la normalización demostró un solo courier consistente por envío. La tasa de devolución deberá ajustarse exactamente al criterio de la pregunta 6: **envíos que llegaron alguna vez a `devuelto` sobre envíos que llegaron a un estado final (`entregado` o `devuelto`)**, evitando la inclusión de envíos todavía en tránsito.
+Para Gold se documentan **4 000 envíos** con marcas suficientes para medir el intervalo entre el primer `pendiente` y el primer `entregado`; hay **18 entregas sin `pendiente`**, todas ellas en envíos mixtos, cuyos tiempos **no se inventan**. En 5 332 envíos Bronze, la normalización demostró un solo courier consistente por envío. En el modelo Gold implementado, la tasa de devolución se define mediante el **último estado cronológico**: envíos cuyo estado actual final es `devuelto` entre envíos cuyo último estado es `entregado` o `devuelto`. Esta definición no debe confundirse con una tasa histórica de envíos que estuvieron alguna vez en estado `devuelto`.
 
 **Evidencias:**
 
@@ -2678,13 +2678,279 @@ ORDER BY fuente, registros DESC;
 
 ---
 
-## 6. Capa Gold
+## 6. Capa Gold: modelos analíticos y respuestas a las seis preguntas de negocio
 
-*Pendiente de implementación y documentación.*
+> **Resultado principal:** **las seis preguntas de negocio requeridas están respondidas** con consultas SQL ejecutadas y tablas Delta Gold. El desarrollo consta de **37 celdas** del notebook [`15_gold_modelo_analitico`](notebooks/15_gold_modelo_analitico.ipynb), **10 tablas Gold** y evidencias en [`evidencias/gold/modelo_analitico/`](evidencias/gold/modelo_analitico/). Período de análisis: **marzo a octubre de 2026** (ocho meses).
+
+### 6.1 Diseño del modelo analítico
+
+La capa Gold consume los datos preparados en Silver y los organiza por granularidades apropiadas: una fila por venta, devolución, evento de vendedor, versión mensual de empleado, producto, sucursal-mes, categoría-mes o envío, según el objetivo. Se utiliza también el historial de **Bronze Catálogo** para reconstruir la última categoría disponible por producto, sin limitar las reseñas a los productos aceptados en el snapshot Silver más reciente.
+
+**Inventario verificado con la celda 37:**
+
+| Tabla (`proyecto_final.gold`) | Granularidad / función | Filas verificadas |
+|---|---|---:|
+| `fact_ventas` | Una fila por venta válida, ambos canales | 17 420 |
+| `fact_devoluciones` | Una fila por devolución relacionada con venta válida | 3 892 |
+| `ventas_netas_mensuales` | Una fila por sucursal y mes | 320 |
+| `productos_metricas` | Una fila por producto vendido | 2 390 |
+| `fact_empleados_mes` | Una fila por empleado activo en cada cierre mensual | 8 765 |
+| `dotacion_mensual` | Una fila por sucursal y mes | 320 |
+| `fact_ventas_vendedor` | Una fila por venta presencial, con sucursal histórica | 12 236 |
+| `dim_productos` | Una fila por producto del último snapshot conocido | 2 400 |
+| `resenas_negativas_mensuales` | Una fila por categoría normalizada y mes | 40 |
+| `fact_envios` | Una fila por `tracking_id`, con historia consolidada | 5 184 |
+
+![Gold: conciliación final de las diez tablas](evidencias/gold/modelo_analitico/37_inventario_final_tablas_gold.png)
+
+### 6.2 Matriz de trazabilidad: las seis preguntas efectivamente respondidas
+
+| Pregunta requerida | Modelo Gold y celdas de respuesta | Resultado probado |
+|---|---|---|
+| **1. Ventas netas por sucursal y mes** | `ventas_netas_mensuales`; celda **08** | **320 sucursal-mes**; ventas netas **S/ 62 320 971,42** |
+| **2. Top 10 productos por unidades y por tasa de devolución** | `productos_metricas`; celdas **11 y 12** | **Dos rankings Top 10**, calculados sobre **2 390 productos vendidos** |
+| **3. Dotación de empleados activos por sucursal al cierre de mes** | `fact_empleados_mes`, `dotacion_mensual`; celda **16** | **320 sucursal-mes**, conciliación con SCD2 sin diferencias |
+| **4. Ventas por vendedor y sucursal histórica, solo tienda física** | `fact_ventas_vendedor`; celda **20** | **12 236 ventas**; **308** sin asignación histórica, sin inventar sucursal |
+| **5. Porcentaje de reseñas negativas por categoría y mes** | `dim_productos`, `resenas_negativas_mensuales`; celda final **32** | **40 categoría-mes**; **17,37 %** negativas globalmente |
+| **6. Horas entre `pendiente` y `entregado` y porcentaje de envíos devueltos** | `fact_envios`; celdas **35 y 36** | **103,20 horas** promedio; **6,45 %** de envíos devueltos |
+
+Las secciones siguientes explican **cómo** se obtiene cada resultado, sus supuestos, controles de calidad y evidencia de ejecución.
+
+### 6.3 Pregunta 1 — ¿Cuáles fueron las ventas netas por sucursal y mes?
+
+**Respuesta: 40 sucursales × ocho meses = 320 filas de análisis.** Se suman ventas brutas de `tienda_fisica` y `ecommerce` en el **mes de venta** y se descuentan los reembolsos en el **mes de devolución**. Se unen ambos agregados por `sucursal_id` y período, manteniendo también combinaciones que existan solo en uno de los dos conjuntos mediante `FULL OUTER JOIN`. El ticket promedio se calcula a partir de las ventas brutas divididas por la cantidad de ventas, no sobre el saldo neto.
+
+| Métrica validada | Valor |
+|---|---:|
+| Ventas registradas | 17 420 |
+| Devoluciones registradas | 3 892 |
+| Ventas brutas | S/ 77 449 986,29 |
+| Reembolsos | S/ 15 129 014,87 |
+| **Ventas netas** | **S/ 62 320 971,42** |
+| Sucursales / meses | 40 / 8 |
+| Registros descuadrados (`netas ≠ brutas − devoluciones`) | **0** |
+
+**Consulta de respuesta — celda 08 del notebook:**
+
+```sql
+SELECT g.periodo, g.sucursal_id, s.nombre_sucursal, s.ciudad,
+       g.cantidad_ventas, g.cantidad_devoluciones,
+       g.ventas_brutas, g.total_devoluciones,
+       g.ventas_netas, g.ticket_promedio
+FROM proyecto_final.gold.ventas_netas_mensuales g
+LEFT JOIN proyecto_final.silver.sucursales s
+  ON g.sucursal_id = s.sucursal_id
+ORDER BY g.periodo, g.ventas_netas DESC, g.sucursal_id
+LIMIT 50;
+```
+
+**Evidencias de creación, conciliación y respuesta:**
+
+![Gold P1: conciliación de ventas netas](evidencias/gold/modelo_analitico/07_validacion_ventas_netas_mensuales.png)
+
+![Gold P1: ventas netas por sucursal, parte A](evidencias/gold/modelo_analitico/08a_pregunta_01_ventas_netas.png)
+
+![Gold P1: ventas netas por sucursal, parte B](evidencias/gold/modelo_analitico/08b_pregunta_01_ventas_netas.png)
+
+### 6.4 Pregunta 2 — ¿Cuáles son los diez productos más vendidos y los diez con mayor tasa de devolución?
+
+**Respuesta: se presentan dos rankings independientes de diez productos cada uno.** `productos_metricas` resume, por producto, unidades vendidas (`SUM(cantidad)`), cantidad de ventas (`COUNT(DISTINCT venta_id)`), importe de ventas, cantidad de devoluciones (`COUNT(DISTINCT devolucion_id)`) y monto reembolsado.
+
+La tasa de devolución se define **por operaciones**, no por unidades:
+
+```text
+tasa_devolucion_pct = 100 × cantidad_devoluciones / cantidad_ventas
+```
+
+Sobre **2 390 productos vendidos** se verificaron **17 420 ventas, 24 884 unidades y 3 892 devoluciones**, sin tasas fuera de 0–100 %. El líder del ranking por unidades es **PRD-02306 (30 unidades, 16 ventas)**. El ranking por mayor tasa contiene productos con **100 % de devolución**, por ejemplo **PRD-01152** con cinco ventas y cinco devoluciones; una tasa alta con pocos casos debe interpretarse con el volumen de operaciones a la vista.
+
+**Consultas de respuesta — celdas 11 y 12:**
+
+```sql
+-- Top 10 por unidades vendidas
+SELECT producto_id, unidades_vendidas, cantidad_ventas,
+       monto_vendido, cantidad_devoluciones, tasa_devolucion_pct
+FROM proyecto_final.gold.productos_metricas
+ORDER BY unidades_vendidas DESC, cantidad_ventas DESC, producto_id
+LIMIT 10;
+
+-- Top 10 por tasa de devolución
+SELECT producto_id, cantidad_ventas, cantidad_devoluciones,
+       unidades_vendidas, tasa_devolucion_pct, monto_reembolsado
+FROM proyecto_final.gold.productos_metricas
+ORDER BY tasa_devolucion_pct DESC,
+         cantidad_devoluciones DESC, cantidad_ventas DESC, producto_id
+LIMIT 10;
+```
+
+![Gold P2: Top 10 por unidades vendidas](evidencias/gold/modelo_analitico/11_pregunta_02a_top_productos_vendidos.png)
+
+![Gold P2: Top 10 por tasa de devolución](evidencias/gold/modelo_analitico/12_pregunta_02b_top_tasa_devolucion.png)
+
+### 6.5 Pregunta 3 — ¿Cuántos empleados activos tenía cada sucursal al cierre de cada mes?
+
+**Respuesta: dotación mensual de las 40 sucursales para cada uno de los ocho cierres de marzo–octubre.** No se utiliza únicamente el estado actual del empleado; se consulta el **historial SCD Tipo 2** de `silver.empleados`. Una versión se considera vigente al cierre cuando `vigente_desde <= fecha_cierre`, `vigente_hasta IS NULL OR vigente_hasta > fecha_cierre` y `activo = TRUE`. Se consolidan empleados distintos por sucursal. Un `CROSS JOIN` entre meses y sucursales garantiza una fila incluso si una sucursal no tiene empleados activos.
+
+| Cierre 2026 | Empleados activos | Sucursales | Diferencia vs. SCD2 |
+|---|---:|---:|---:|
+| Marzo | 1 023 | 40 | 0 |
+| Abril | 1 060 | 40 | 0 |
+| Mayo | 1 068 | 40 | 0 |
+| Junio | 1 102 | 40 | 0 |
+| Julio | 1 109 | 40 | 0 |
+| Agosto | 1 136 | 40 | 0 |
+| Septiembre | 1 158 | 40 | 0 |
+| Octubre | 1 109 | 40 | 0 |
+
+**Consulta de respuesta — celda 16:**
+
+```sql
+SELECT periodo, fecha_cierre, sucursal_id,
+       nombre_sucursal, ciudad, empleados_activos
+FROM proyecto_final.gold.dotacion_mensual
+ORDER BY periodo, empleados_activos DESC, sucursal_id
+LIMIT 50;
+```
+
+El control de la celda **17** reconcilia cada cierre con el SCD2; **los ocho períodos presentaron diferencia cero y estado `OK`**.
+
+![Gold P3: dotación mensual por sucursal](evidencias/gold/modelo_analitico/16_pregunta_03_dotacion_mensual.png)
+
+![Gold P3: conciliación con SCD Tipo 2](evidencias/gold/modelo_analitico/17_conciliacion_dotacion_scd2.png)
+
+### 6.6 Pregunta 4 — ¿Cuánto vendió cada vendedor en tienda física y en qué sucursal estaba asignado cuando vendió?
+
+**Respuesta: 12 236 ventas físicas, con sucursal histórica determinada por la vigencia SCD2 del empleado al momento de la venta.** Las **5 184 ventas ecommerce** no forman parte de esta pregunta. El notebook busca la versión del vendedor correspondiente a `fecha_venta`; cuando no existe una versión histórica activa aplicable utiliza el identificador explícito **`SIN_ASIGNAR`**, sin atribuir artificialmente la venta a la sucursal actual o al origen de la operación.
+
+| Indicador | Resultado |
+|---|---:|
+| Ventas físicas / IDs distintos | 12 236 |
+| Vendedores distintos | 984 |
+| Importe de ventas físicas | S/ 54 727 797,80 |
+| Ventas con asignación histórica | 11 928 |
+| Ventas sin asignación histórica | **308** |
+
+**Consulta de respuesta — celda 20:**
+
+```sql
+SELECT v.periodo, v.vendedor_id,
+       v.sucursal_historica AS sucursal_id,
+       COALESCE(s.nombre_sucursal, 'SIN_ASIGNAR') AS nombre_sucursal,
+       COUNT(DISTINCT v.venta_id) AS cantidad_ventas,
+       ROUND(SUM(v.monto_total), 2) AS monto_vendido
+FROM proyecto_final.gold.fact_ventas_vendedor v
+LEFT JOIN proyecto_final.silver.sucursales s
+  ON v.sucursal_historica = s.sucursal_id
+GROUP BY v.periodo, v.vendedor_id, v.sucursal_historica, s.nombre_sucursal
+ORDER BY v.periodo, monto_vendido DESC, v.vendedor_id
+LIMIT 50;
+```
+
+![Gold P4: conciliación de venta física y asignación histórica](evidencias/gold/modelo_analitico/19_validacion_ventas_vendedor.png)
+
+![Gold P4: ventas agrupadas por vendedor y sucursal histórica](evidencias/gold/modelo_analitico/20_pregunta_04_ventas_vendedor.png)
+
+### 6.7 Pregunta 5 — ¿Qué porcentaje de reseñas negativas hubo por categoría y mes?
+
+**Respuesta: 40 combinaciones categoría-mes y un 17,37 % de reseñas negativas en conjunto.** Se consideran negativas las calificaciones **1 y 2**; el denominador incluye todas las reseñas aceptadas. La categoría se consulta a partir del **último snapshot disponible de cada producto**, reconstruido desde Bronze Catálogo: **2 400 productos distintos** en la dimensión Gold y **cero reseñas sin categoría**.
+
+Se detectó y corrigió una inconsistencia de escritura: `Linea_blanca`/`Línea blanca` y `Climatizacion`/`Climatización`. La primera agregación produjo siete valores textuales de categoría; la corrección (celdas **29 y 30**) los unificó en **cinco categorías**, sin eliminar reseñas. La **respuesta final y vigente** es la celda **32**, no la consulta exploratoria de la celda 28.
+
+| Métrica final | Valor |
+|---|---:|
+| Meses / categorías normalizadas | 8 / 5 |
+| Registros categoría-mes | **40** |
+| Reseñas totales | 8 977 |
+| Reseñas negativas (1 o 2) | 1 559 |
+| Reseñas no negativas | 7 418 |
+| **Porcentaje negativo global** | **17,37 %** |
+| Reseñas sin categoría | 0 |
+
+**Consulta de respuesta — celda 32:**
+
+```sql
+SELECT periodo, categoria, total_resenas,
+       resenas_negativas, resenas_no_negativas, porcentaje_negativas
+FROM proyecto_final.gold.resenas_negativas_mensuales
+ORDER BY periodo, porcentaje_negativas DESC, categoria;
+```
+
+**Reproducibilidad:** en el notebook entregado, la creación inicial de `dim_productos` (celda 24) no corrige por sí sola todos los valores con guion bajo. Para reproducir el **resultado final validado**, las celdas deben ejecutarse secuencialmente, **incluidas las celdas 29 y 30**. Al transformar el notebook en un pipeline se deberá integrar la normalización en la construcción de la dimensión, antes de crear los agregados, para evitar escrituras y consultas intermedias con categorías sin consolidar.
+
+![Gold P5: corrección de categorías](evidencias/gold/modelo_analitico/29_correccion_categorias_gold.png)
+
+![Gold P5: validación definitiva de las cinco categorías](evidencias/gold/modelo_analitico/31_validacion_final_resenas.png)
+
+![Gold P5: consulta final por categoría y mes](evidencias/gold/modelo_analitico/32_pregunta_05_resenas_corregidas.png)
+
+### 6.8 Pregunta 6 — ¿Cuánto tardan los envíos y qué porcentaje termina devuelto?
+
+**Respuesta: 103,20 horas promedio de entrega, equivalentes a aproximadamente 4,30 días; 6,45 % de los envíos con estado final quedaron devueltos.** `gold.fact_envios` consolida los **14 663 eventos Silver** en **5 184 `tracking_id` únicos**. Para cada envío toma el primer evento `pendiente`, el primer `entregado` y el último evento cronológico (desempate por `evento_id`). El tiempo se mide desde el primer `pendiente` hasta el primer `entregado`, únicamente en envíos cuyo **último estado es `entregado`** y cuyo intervalo es válido.
+
+La tasa utilizada en la consulta implementada es:
+
+```text
+porcentaje_envios_devueltos =
+  100 × envíos cuyo último estado es 'devuelto'
+      / envíos cuyo último estado es 'entregado' o 'devuelto'
+```
+
+| Métrica verificada | Valor |
+|---|---:|
+| Envíos distintos | 5 184 |
+| Eventos históricos considerados | 14 663 |
+| Estado final `entregado` | 4 018 |
+| Estado final `devuelto` | 277 |
+| Envíos con estado final | **4 295** |
+| Entregas con tiempo calculable | 4 000 |
+| Entregas sin evento inicial `pendiente` | **18** |
+| **Tiempo medio** | **103,20 horas** |
+| Tiempo mínimo / máximo | 15,12 / 191,00 horas |
+| **Porcentaje de envíos devueltos** | **6,45 %** |
+| Tiempos negativos | **0** |
+
+Los 18 envíos sin inicio `pendiente` **no se imputan**: se excluyen del promedio, pero permanecen en el conteo de entregados. Los envíos `pendiente` o `en_transito` **no entran en el denominador de la tasa final**. Los resultados corresponden a estado **final al corte del historial**, no a la proporción que alguna vez tuvo una devolución.
+
+**Consulta de respuesta — celda 35 (versión resumida de los indicadores):**
+
+```sql
+SELECT COUNT(*) AS total_envios,
+       SUM(CASE WHEN estado_final = 'entregado' THEN 1 ELSE 0 END) AS entregados,
+       SUM(CASE WHEN estado_final = 'devuelto' THEN 1 ELSE 0 END) AS devueltos,
+       COUNT(horas_entrega) AS entregas_tiempo_calculable,
+       ROUND(AVG(horas_entrega), 2) AS horas_promedio,
+       CAST(100.0 * SUM(es_devuelto) /
+            NULLIF(SUM(tiene_estado_final), 0) AS DECIMAL(10,2))
+            AS porcentaje_devueltos
+FROM proyecto_final.gold.fact_envios;
+```
+
+La celda **36** muestra los envíos individuales con fecha de inicio, fecha de entrega y horas calculadas.
+
+![Gold P6: indicadores de envíos, primera parte](evidencias/gold/modelo_analitico/35a_pregunta_06_metricas_envios.png)
+
+![Gold P6: promedio, extremos y porcentaje de devolución](evidencias/gold/modelo_analitico/35b_pregunta_06_metricas_envios.png)
+
+![Gold P6: detalle de envíos con tiempo calculable](evidencias/gold/modelo_analitico/36_detalle_tiempos_entrega.png)
+
+### 6.9 Validaciones cruzadas, límites y reproducibilidad
+
+**Conciliación general de Gold:** 17 420 ventas y 3 892 devoluciones alimentan las preguntas 1 y 2; las 12 236 ventas de canal físico son un subconjunto de `fact_ventas`; los 8 765 registros históricos empleado-mes agregan a 320 combinaciones sucursal-mes; las 8 977 reseñas agregan a 40 combinaciones categoría-mes; los 14 663 eventos de seguimiento se consolidan en 5 184 envíos. Se comprobó además: ninguna diferencia contable en ventas netas, ninguna diferencia mensual frente al SCD2, ningún porcentaje negativo fuera de rango en la validación previa, y ningún tiempo de entrega negativo.
+
+**Consideraciones técnicas:**
+
+1. Las 37 celdas del notebook se ejecutaron de manera manual. La capa Gold **está construida y responde las seis preguntas**, pero todavía **no está automatizada** mediante el pipeline o bundle declarativo del proyecto.
+2. Las escrituras `CREATE OR REPLACE TABLE` reconstruyen tablas completas. La futura automatización deberá establecer dependencias Bronze → Silver → Gold y definir la estrategia de actualización e idempotencia.
+3. El catálogo histórico de productos se usa para clasificar todas las reseñas; la dimensión Gold de 2 400 productos **no equivale** a los 2 349 productos válidos del snapshot Silver actual.
+4. La asignación de vendedores sin vigencia histórica se deja explícitamente en `SIN_ASIGNAR`; las 18 entregas sin evento `pendiente` conservan `horas_entrega = NULL`.
+5. La columna `dni` no participa en las respuestas Gold. Las políticas de masking y la prueba de acceso mediante distintos grupos quedan **pendientes de implementación y evidencia**.
+
+**Trazabilidad del desarrollo:** notebook [`15_gold_modelo_analitico.ipynb`](notebooks/15_gold_modelo_analitico.ipynb), celdas **01–37**, con evidencia organizada en `evidencias/gold/modelo_analitico/` y nombres que coinciden con el inventario visual del workspace. La ruta con doble extensión `18_creacion_fact_ventas_vendedor.png.png` **es el nombre observado en el workspace**; no debe simplificarse al enlazar esa imagen hasta renombrar físicamente el archivo.
+
+![Gold: construcción de ventas por vendedor (nombre real del archivo)](evidencias/gold/modelo_analitico/18_creacion_fact_ventas_vendedor.png.png)
 
 ---
 
-## 7. Despliegue y automatización
+## 7. Despliegue, automatización y seguridad pendiente
 
-*Pendiente de completar la configuración de Databricks
-Declarative Automation Bundles y los recursos del proyecto.*
+Las capas **Bronze, Silver y Gold están implementadas** y sus resultados de negocio están documentados. Para cerrar el entregable operativo quedan por completar y validar: **orquestación de ejecución por dependencias**, expectativas/calidad automatizadas según los requisitos del curso, **política de enmascaramiento del DNI con comprobación efectiva por grupos**, archivos YAML del bundle de despliegue, ejecución de prueba extremo a extremo y documentación definitiva de esos componentes en este README. Estas actividades se distinguen expresamente de las seis preguntas analíticas, que **sí están contestadas y verificadas**.

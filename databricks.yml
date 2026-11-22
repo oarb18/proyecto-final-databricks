@@ -1,0 +1,35 @@
+bundle:
+  name: electrocasa
+
+include:
+  - resources/*.yml
+
+variables:
+  tracking_pipeline_id:
+    description: ID del pipeline Lakeflow Connect que ingiere tracking_envios (recurso existente)
+    default: b8ddc256-8b7d-468e-81f5-4c6097668828
+  catalogo:
+    description: Catalogo Unity Catalog
+    default: proyecto_final
+  schema_salida:
+    description: Esquema del pipeline declarativo para este target
+    default: gold_bundle_dev
+
+targets:
+  dev:
+    default: true
+    mode: development
+    variables:
+      catalogo: proyecto_final
+      schema_salida: gold_bundle_dev
+    workspace:
+      host: https://dbc-515d3efb-1d56.cloud.databricks.com
+
+  prod:
+    mode: production
+    variables:
+      catalogo: proyecto_final
+      schema_salida: gold
+    workspace:
+      host: https://dbc-515d3efb-1d56.cloud.databricks.com
+      root_path: /Workspace/Users/ochavezarbayza@outlook.es/.bundle/${bundle.name}/${bundle.target}

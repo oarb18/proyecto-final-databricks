@@ -1,0 +1,11 @@
+resources:
+  pipelines:
+    electrocasa_pipeline_declarativo:
+      name: electrocasa_pipeline_declarativo_${bundle.target}
+      catalog: ${var.catalogo}
+      schema: ${var.schema_salida}
+      serverless: true
+      continuous: false
+      libraries:
+        - file:
+            path: ../pipelines/electrocasa_declarativo.py

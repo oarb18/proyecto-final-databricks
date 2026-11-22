@@ -1,0 +1,103 @@
+resources:
+  jobs:
+    electrocasa_pipeline_medallion:
+      name: electrocasa_pipeline_medallion_${bundle.target}
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
+      tasks:
+        - task_key: bronze_catalogo
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/03_bronze_catalogo
+            source: WORKSPACE
+        - task_key: bronze_devoluciones
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/07_bronze_devoluciones
+            source: WORKSPACE
+        - task_key: bronze_empleados
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/05_bronze_empleados
+            source: WORKSPACE
+        - task_key: bronze_resenas
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/06_bronze_resenas
+            source: WORKSPACE
+        - task_key: bronze_sucursales
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/04_bronze_sucursales
+            source: WORKSPACE
+        - task_key: bronze_tracking_envios
+          pipeline_task:
+            pipeline_id: ${var.tracking_pipeline_id}
+            full_refresh: false
+        - task_key: bronze_ventas
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/02_bronze_ventas
+            source: WORKSPACE
+        - task_key: validar_bronze
+          depends_on:
+            - task_key: bronze_catalogo
+            - task_key: bronze_tracking_envios
+            - task_key: bronze_resenas
+            - task_key: bronze_devoluciones
+            - task_key: bronze_ventas
+            - task_key: bronze_sucursales
+            - task_key: bronze_empleados
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/16_validar_bronze
+            source: WORKSPACE
+        - task_key: silver_sucursales
+          depends_on:
+            - task_key: validar_bronze
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/08_silver_sucursales
+            source: WORKSPACE
+        - task_key: silver_catalogo
+          depends_on:
+            - task_key: silver_sucursales
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/09_silver_catalogo
+            source: WORKSPACE
+        - task_key: silver_empleados
+          depends_on:
+            - task_key: silver_catalogo
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/10_silver_empleados
+            source: WORKSPACE
+        - task_key: silver_resenas
+          depends_on:
+            - task_key: silver_empleados
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/11_silver_resenas
+            source: WORKSPACE
+        - task_key: silver_ventas
+          depends_on:
+            - task_key: silver_resenas
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/12_silver_ventas
+            source: WORKSPACE
+        - task_key: silver_devoluciones
+          depends_on:
+            - task_key: silver_ventas
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/13_silver_devoluciones
+            source: WORKSPACE
+        - task_key: silver_tracking_envios
+          depends_on:
+            - task_key: silver_devoluciones
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/14_silver_tracking_envios
+            source: WORKSPACE
+        - task_key: validar_silver
+          depends_on:
+            - task_key: silver_tracking_envios
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/17_validar_silver
+            source: WORKSPACE
+        - task_key: gold_modelo_analitico
+          depends_on:
+            - task_key: validar_silver
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/15_gold_modelo_analitico
+            source: WORKSPACE

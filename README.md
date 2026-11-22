@@ -23,7 +23,7 @@ La arquitectura se organiza en tres capas:
   y controles de calidad.
 - **Gold:** construcción de modelos analíticos e indicadores de negocio.
 
-> **Estado del proyecto (21/11/2026):** las siete fuentes Silver y los **10 modelos analíticos Gold** están construidos y validados. **Se han respondido las seis preguntas de negocio del proyecto** con consultas SQL y evidencias de ejecución. Están pendientes la orquestación declarativa, las pruebas de enmascaramiento por grupo y el despliegue automatizado. Bronze y Silver están documentados en las secciones anteriores; Gold se presenta en la sección 6.
+> **Estado del proyecto (22/11/2026):** las siete fuentes Bronze y Silver, los **10 modelos analíticos Gold** y las **seis preguntas de negocio** están implementados y validados. El Job `electrocasa_pipeline_medallion` completó satisfactoriamente una ejecución integral de 17 tareas el 21/11/2026 (`Succeeded`, 16 min 27 s). Los conteos Gold y los **1 776 registros en cuarentena** se conservaron tras la ejecución. Las máscaras de DNI y salario y los permisos de Gold fueron verificados. Quedan pendientes el bundle YAML, su despliegue validado y las pruebas de auditoría/lineage correspondientes.
 
 ---
 
@@ -2939,11 +2939,11 @@ La celda **36** muestra los envíos individuales con fecha de inicio, fecha de e
 
 **Consideraciones técnicas:**
 
-1. Las 37 celdas del notebook se ejecutaron de manera manual. La capa Gold **está construida y responde las seis preguntas**, pero todavía **no está automatizada** mediante el pipeline o bundle declarativo del proyecto.
-2. Las escrituras `CREATE OR REPLACE TABLE` reconstruyen tablas completas. La futura automatización deberá establecer dependencias Bronze → Silver → Gold y definir la estrategia de actualización e idempotencia.
+1. Las 37 celdas se desarrollaron y validaron inicialmente de forma manual. Posteriormente, el notebook Gold se incorporó como última tarea de un **Job de 17 tareas**, ejecutado exitosamente de extremo a extremo; el **bundle declarativo YAML** continúa pendiente.
+2. Las escrituras `CREATE OR REPLACE TABLE` reconstruyen los resultados Gold completos en cada corrida. Esta estrategia requiere ejecutar primero sus fuentes Silver y no equivale a una carga incremental Gold.
 3. El catálogo histórico de productos se usa para clasificar todas las reseñas; la dimensión Gold de 2 400 productos **no equivale** a los 2 349 productos válidos del snapshot Silver actual.
 4. La asignación de vendedores sin vigencia histórica se deja explícitamente en `SIN_ASIGNAR`; las 18 entregas sin evento `pendiente` conservan `horas_entrega = NULL`.
-5. La columna `dni` no participa en las respuestas Gold. Las políticas de masking y la prueba de acceso mediante distintos grupos quedan **pendientes de implementación y evidencia**.
+5. La columna `dni` no participa en las seis respuestas de negocio de Gold. Las máscaras de `dni` y `salario` en `silver.empleados` **se probaron efectivamente** con y sin pertenencia al grupo Ingeniería; su funcionamiento y los permisos del esquema Gold se documentan en la sección 7.
 
 **Trazabilidad del desarrollo:** notebook [`15_gold_modelo_analitico.ipynb`](notebooks/15_gold_modelo_analitico.ipynb), celdas **01–37**, con evidencia organizada en `evidencias/gold/modelo_analitico/` y nombres que coinciden con el inventario visual del workspace. La ruta con doble extensión `18_creacion_fact_ventas_vendedor.png.png` **es el nombre observado en el workspace**; no debe simplificarse al enlazar esa imagen hasta renombrar físicamente el archivo.
 
@@ -2951,6 +2951,148 @@ La celda **36** muestra los envíos individuales con fecha de inicio, fecha de e
 
 ---
 
-## 7. Despliegue, automatización y seguridad pendiente
+## 7. Orquestación integral, validaciones y seguridad
 
-Las capas **Bronze, Silver y Gold están implementadas** y sus resultados de negocio están documentados. Para cerrar el entregable operativo quedan por completar y validar: **orquestación de ejecución por dependencias**, expectativas/calidad automatizadas según los requisitos del curso, **política de enmascaramiento del DNI con comprobación efectiva por grupos**, archivos YAML del bundle de despliegue, ejecución de prueba extremo a extremo y documentación definitiva de esos componentes en este README. Estas actividades se distinguen expresamente de las seis preguntas analíticas, que **sí están contestadas y verificadas**.
+### 7.1 Implementación del Job Medallion
+
+El Job **`electrocasa_pipeline_medallion`** se configuró en **Jobs & Pipelines** de Databricks Free Edition y ejecuta la arquitectura completa **Bronze → Silver → Gold**, con **17 tareas** y dependencias explícitas. La orquestación se creó y probó desde la interfaz gráfica del workspace; **aún no constituye un despliegue de Databricks Asset Bundles**.
+
+| Fase | Tareas | Diseño de la ejecución |
+|---|---:|---|
+| Bronze | 7 | Seis notebooks de ingesta y el pipeline `pl_ingesta_tracking_envios`, habilitados sin dependencia mutua para iniciar en paralelo |
+| Barrera Bronze | 1 | `validar_bronze`, dependiente de las siete tareas Bronze y configurada con `All succeeded` |
+| Silver | 7 | Notebooks de transformación en orden secuencial, tras `validar_bronze` |
+| Barrera Silver | 1 | `validar_silver`, que espera la finalización correcta de toda Silver |
+| Gold | 1 | Notebook `15_gold_modelo_analitico`, dependiente de `validar_silver` |
+| **Total** | **17** | **Orquestación completa** |
+
+La ingesta de **tracking de envíos** utiliza un *ingestion pipeline* de Lakeflow Connect vinculado al Job; no se reemplazó por un notebook genérico. Para las tareas notebook se utilizó cómputo **Serverless**. Las tareas dependientes se activan con la condición `All succeeded`, evitando que Gold se reconstruya si alguna fase previa falla.
+
+**Ejecución integral verificada:**
+
+| Dato | Resultado |
+|---|---|
+| Job | `electrocasa_pipeline_medallion` |
+| Fecha de inicio | 21 de noviembre de 2026, 9:19 p. m. (hora de Lima) |
+| Run ID | `415695451415958` |
+| Modalidad | Manual |
+| Duración | **16 minutos y 27 segundos** |
+| Estado final | **Succeeded** |
+
+[Detalle de la ejecución en Databricks](https://dbc-515d3efb-1d56.cloud.databricks.com/jobs/470247547395281/runs/415695451415958?o=7474656552664661)
+
+Las tres capturas de la ejecución se encuentran en `evidencias/pipelines/`:
+
+![Ejecución del pipeline Medallion — evidencia A](evidencias/pipelines/03a_ejecucion_pipeline_medallion.png)
+
+![Ejecución del pipeline Medallion — evidencia B](evidencias/pipelines/03b_ejecucion_pipeline_medallion.png)
+
+![Ejecución del pipeline Medallion — evidencia C](evidencias/pipelines/03c_ejecucion_pipeline_medallion.png)
+
+### 7.2 ¿Por qué Silver se ejecuta secuencialmente?
+
+Aunque las fuentes Bronze son independientes y pueden iniciarse en paralelo, las siete transformaciones Silver **comparten la tabla Delta `proyecto_final.silver.cuarentena`** como destino de los registros rechazados. Durante la integración del Job se optó por la ejecución **secuencial de Silver** para evitar escrituras simultáneas sobre este destino común y simplificar la garantía de consistencia de las cargas.
+
+El orden implantado es: `silver_sucursales` → `silver_catalogo` → `silver_empleados` → `silver_resenas` → `silver_ventas` → `silver_devoluciones` → `silver_tracking_envios`, seguido por `validar_silver` y la tarea Gold. Se preservaron los notebooks de transformación previamente validados y se priorizó completar una ejecución integral consistente.
+
+**Esta serialización es una decisión de orquestación de la implementación actual, no una obligación de la arquitectura Medallion.** Una evolución podría paralelizar Silver separando los rechazos por fuente, aplicando escrituras concurrentes seguras o consolidándolos mediante una etapa posterior. La ejecución exitosa prueba el comportamiento del flujo configurado, no garantiza por sí sola que cualquier nuevo lote sea idempotente ni que no haya conflictos bajo una configuración paralela distinta.
+
+### 7.3 Validación de cuarentena después del Job
+
+La cuarentena concentra los registros que no cumplen las reglas de calidad de Silver. Se verificó su estado **antes y después de la ejecución completa del Job** y se constató que los conteos por fuente permanecieron iguales; el respaldo de control también registraba **1 776 filas** antes de la prueba.
+
+```sql
+SELECT
+    COALESCE(fuente, 'TOTAL') AS fuente,
+    COUNT(*) AS total_rechazos
+FROM proyecto_final.silver.cuarentena
+GROUP BY ROLLUP(fuente)
+ORDER BY fuente;
+```
+
+| Fuente | Rechazos conservados |
+|---|---:|
+| catalogo | 51 |
+| devoluciones | 265 |
+| empleados | 181 |
+| resenas | 223 |
+| tracking_envios | 476 |
+| ventas | 580 |
+| **TOTAL** | **1 776** |
+
+La igualdad de los conteos acredita que **no se perdieron ni duplicaron filas en el agregado observado tras esta corrida**, pero no sustituye una comparación fila a fila ni garantiza por sí misma la idempotencia ante nuevas entradas. La tabla es un registro consolidado de rechazos; la política de escritura se trata como una decisión técnica específica de cada proceso Silver y **no debe asumirse que los rechazos se agregan indefinidamente con `append`**.
+
+![Rechazos en cuarentena tras la ejecución integral](evidencias/pipelines/04_validacion_cuarentena_post_ejecucion.png)
+
+### 7.4 Validación posterior de los modelos Gold
+
+Se ejecutaron consultas `COUNT(*)` sobre modelos relevantes después de la corrida integral y se comprobaron los mismos conteos que durante el desarrollo manual:
+
+| Tabla Gold | Filas verificadas |
+|---|---:|
+| `fact_ventas` | 17 420 |
+| `fact_devoluciones` | 3 892 |
+| `fact_envios` | 5 184 |
+| `dim_productos` | 2 400 |
+| `resenas_negativas_mensuales` | 40 |
+
+El resultado es coherente con las **seis preguntas de negocio resueltas en la sección 6**; esta comprobación por conteos no sustituye todas las conciliaciones de importes y tasas presentadas allí.
+
+### 7.5 Protección de DNI y salario en Unity Catalog
+
+En la tabla histórica SCD2 `proyecto_final.silver.empleados` se aplicaron dos **column masks** administradas por Unity Catalog:
+
+| Columna | Función aplicada | Para `electrocasa_ingenieria` | Sin pertenencia a Ingeniería |
+|---|---|---|---|
+| `dni` | `proyecto_final.silver.mask_dni` | DNI original | `********` |
+| `salario` | `proyecto_final.silver.mask_salario` | Importe original | `NULL` de tipo `DECIMAL(12,2)` |
+
+Las funciones verifican `is_account_group_member('electrocasa_ingenieria')`. La asociación se comprobó mediante `SHOW CREATE TABLE proyecto_final.silver.empleados`, que muestra las cláusulas `MASK` en ambas columnas.
+
+La prueba visual utilizó **la misma consulta `SELECT ... LIMIT 10`** en dos sesiones con distinta pertenencia efectiva a grupos. Inicialmente, el usuario de prueba pertenecía a Ingeniería y podía consultar ambos valores; después se retiró temporalmente de Ingeniería, permaneciendo en Analistas y `admins`, y el mismo `SELECT` devolvió `********` para DNI y `NULL` para salario. Por último, se restauró Ingeniería y se verificó nuevamente `is_account_group_member(...) = true`.
+
+```sql
+SELECT
+    id_empleado,
+    dni,
+    salario,
+    cargo,
+    sucursal_id
+FROM proyecto_final.silver.empleados
+WHERE es_actual = TRUE
+ORDER BY id_empleado
+LIMIT 10;
+```
+
+La prueba de la máscara fue **real** y no una simulación de resultados. La identidad utilizada era también administradora del workspace; por ello, **no representa una prueba completa de los permisos efectivos de un usuario Analista no administrador**. La propagación de los cambios de grupos pudo requerir nueva sesión/consulta. Los resultados visuales iniciales no enmascarados no deben interpretarse como un resultado de la política para el grupo Analistas una vez actualizada la pertenencia.
+
+**Advertencia de publicación:** la imagen del caso Ingeniería contiene valores de DNI y salario originales. Aunque los datos del proyecto sean ficticios, para un repositorio público es preferible **ocultar esos valores en la captura** antes de publicarla. El enlace siguiente identifica el nombre aportado por el proyecto, sin afirmar que haya sido anonimizado.
+
+![Seguridad — prueba top 10 como Ingeniería](evidencias/Seguridad/01_dni_salario_ingenieria_top10.png)
+
+![Seguridad — prueba top 10 como Analistas](evidencias/Seguridad/02_dni_salario_analista_top10.png)
+
+### 7.6 Privilegios verificados sobre Gold
+
+La consulta `SHOW GRANTS ON SCHEMA proyecto_final.gold` confirmó la configuración directa de permisos del esquema:
+
+| Grupo | Privilegios observados sobre `gold` |
+|---|---|
+| `electrocasa_ingenieria` | `SELECT`, `MODIFY`, `USE SCHEMA`, `CREATE TABLE`, `CREATE MATERIALIZED VIEW` |
+| `electrocasa_analistas` | `SELECT`, `USE SCHEMA` |
+| `electrocasa_auditoria` | `SELECT`, `USE SCHEMA` |
+
+Esta configuración concuerda con el requisito de **lectura y escritura para Ingeniería y solo lectura para Analistas y Auditoría en Gold**. La evidencia muestra privilegios sobre el esquema; la verificación completa de acceso efectivo también requiere considerar `USE CATALOG` y otros posibles privilegios heredados.
+
+![Permisos de acceso de los tres grupos al esquema Gold](evidencias/Seguridad/03_permisos_gold_por_grupo.png)
+
+La demostración controlada de `GRANT SELECT` y posterior `REVOKE SELECT` sobre Silver ya se documenta en la **sección 3** y mantiene sus evidencias originales.
+
+### 7.7 Pendientes de entrega: bundle, auditoría y monitoreo
+
+- **Databricks Asset Bundles:** crear `databricks.yml` y los recursos declarativos en `resources/`, definir `dev` y `prod` y obtener evidencia de validación/despliegue exitoso. El Job configurado y probado en la UI **no equivale** a tener ese YAML desplegado.
+- **Auditoría y lineage:** documentar la consulta a `system.access` si está disponible o registrar la limitación de Free Edition y utilizar la pestaña **Lineage** de Catalog Explorer como alternativa, conforme al enunciado.
+- **Monitoreo y costos:** documentar historial de ejecución o event log, así como la justificación de Serverless para la frecuencia y criticidad del flujo.
+- **Verificación final del repositorio público:** revisar que los vínculos a las evidencias existan con la capitalización correcta (`evidencias/Seguridad/`) y que las imágenes públicas no expongan valores originales sensibles.
+
+**Resumen:** Bronze, Silver, Gold, las **seis preguntas de negocio**, la ejecución integral del Job y la validación de enmascaramiento están completadas. El **despliegue declarativo con YAML y la documentación de auditoría** son las principales tareas aún pendientes; no se presentan como realizadas.

@@ -23,7 +23,7 @@ La arquitectura se organiza en tres capas:
   y controles de calidad.
 - **Gold:** construcción de modelos analíticos e indicadores de negocio.
 
-> **Estado del proyecto (22/11/2026):** las siete fuentes Bronze y Silver, los **10 modelos analíticos Gold** y las **seis preguntas de negocio** están implementados y validados. El Job `electrocasa_pipeline_medallion` completó satisfactoriamente una ejecución integral de 17 tareas el 21/11/2026 (`Succeeded`, 16 min 27 s). Los conteos Gold y los **1 776 registros en cuarentena** se conservaron tras la ejecución. Las máscaras de DNI y salario y los permisos de Gold fueron verificados. Quedan pendientes el bundle YAML, su despliegue validado y las pruebas de auditoría/lineage correspondientes.
+> **Estado del proyecto (22/11/2026):** las siete fuentes Bronze y Silver, los **10 modelos analíticos Gold** y las **seis preguntas de negocio** están implementados y validados. El Job original `electrocasa_pipeline_medallion` completó exitosamente sus **17 tareas** el 21/11/2026 (`Succeeded`, 16 min 27 s). Los **1 776 rechazos** de cuarentena se conservaron. Se verificaron las máscaras de DNI y salario y los privilegios de Gold. Asimismo, se ejecutó un **Lakeflow Spark Declarative Pipeline** con dos vistas materializadas y dos expectativas de calidad, y se desplegó exitosamente el **Databricks Asset Bundle** en los targets `dev` y `prod`. Las evidencias de ejecución, despliegue y lineage se incluyen en la sección 7.
 
 ---
 
@@ -329,9 +329,7 @@ La demostración evidencia los siguientes principios:
 revocado y la configuración quedó alineada con
 el modelo de acceso previsto para los analistas.
 
-La protección de columnas sensibles mediante
-enmascaramiento y etiquetas se abordará
-posteriormente en la implementación de Silver.
+La protección efectiva de `dni` y `salario` mediante máscaras de Unity Catalog y sus pruebas por grupo se describen en la sección 7.5.
 
 ### 3.7 Evidencias de ejecución
 
@@ -1491,9 +1489,7 @@ Entre las medidas previstas se encuentran:
 - Enmascaramiento de columnas sensibles.
 - Publicación de información autorizada.
 
-La implementación de estos controles se
-documentará cuando se configure la seguridad
-definitiva de las tablas correspondientes.
+Las máscaras de `dni` y `salario` y su validación visual de acceso por grupos se documentan en la sección 7.5.
 
 #### 4.5.15 Conclusión de la ingesta de empleados
 
@@ -2437,7 +2433,7 @@ automatizado del proyecto.
 
 Se implementaron las transformaciones de las **siete fuentes** en el catálogo `proyecto_final`, mediante notebooks PySpark/SQL que leen las tablas `bronze`, aplican reglas de negocio y escriben tablas Delta administradas bajo `silver`. La finalidad es que **Gold consuma datos depurados, tipados y deduplicados**, sin incorporar registros rechazados. Los contratos asociados se mantienen en `contratos/<fuente>.yml`.
 
-> **Alcance de la evidencia:** las transformaciones documentadas se ejecutaron mediante notebooks. Su integración como *Lakeflow Spark Declarative Pipeline* con expectativas `dp.expect`/`CONSTRAINT EXPECT` se abordará en la etapa de automatización; no se presenta como un pipeline ya desplegado. Los datos e historiales de Bronze se conservan.
+> **Alcance de la evidencia:** el procesamiento principal Bronze, Silver y Gold está implementado mediante notebooks orquestados por Lakeflow Jobs. Adicionalmente se implementó y ejecutó un Lakeflow Spark Declarative Pipeline independiente, con dos vistas materializadas y expectativas `expect_or_drop`, documentado en la sección 7.7. No se afirma que los 17 notebooks se hayan convertido a definiciones declarativas.
 
 | Fuente | Notebook | Tabla Silver | Decisión principal |
 |---|---|---|---|
@@ -2525,7 +2521,7 @@ Para construir SCD2, tras verificar que no hay secuencias inválidas, el código
 
 **Resultados documentados:** 4 231 versiones históricas; 1 460 empleados distintos; 1 109 empleados activos actuales; **181 eventos en cuarentena**. Los conteos de eventos Bronze y de versiones SCD2 **no deben sumarse como si fueran una misma granularidad**: el notebook consolida eventos del mismo día en una versión.
 
-En el mismo notebook se crean funciones SQL `proyecto_final.silver.mask_dni` y `proyecto_final.silver.mask_salario`. El `CREATE TABLE ... MASK` aplica esas funciones a `dni` y `salario`: los miembros de `electrocasa_ingenieria` pueden consultar el valor original por `is_account_group_member(...)`; para otros usuarios DNI se presenta como `********` y salario como `NULL`. La declaración de las máscaras **está en el código**, pero la demostración efectiva con usuarios o grupos diferentes y el tratamiento en un pipeline declarativo se documentarán posteriormente junto con gobierno y seguridad.
+En el mismo notebook se crean funciones SQL `proyecto_final.silver.mask_dni` y `proyecto_final.silver.mask_salario`. El `CREATE TABLE ... MASK` aplica esas funciones a `dni` y `salario`: los miembros de `electrocasa_ingenieria` pueden consultar el valor original por `is_account_group_member(...)`; para otros usuarios DNI se presenta como `********` y salario como `NULL`. La declaración de las máscaras **está en el código** y su funcionamiento efectivo se verificó con diferentes pertenencias a grupos, como se muestra en la sección 7.5. El pipeline declarativo adicional no procesa información de empleados ni altera estas máscaras.
 
 **Evidencias:**
 
@@ -2875,7 +2871,7 @@ FROM proyecto_final.gold.resenas_negativas_mensuales
 ORDER BY periodo, porcentaje_negativas DESC, categoria;
 ```
 
-**Reproducibilidad:** en el notebook entregado, la creación inicial de `dim_productos` (celda 24) no corrige por sí sola todos los valores con guion bajo. Para reproducir el **resultado final validado**, las celdas deben ejecutarse secuencialmente, **incluidas las celdas 29 y 30**. Al transformar el notebook en un pipeline se deberá integrar la normalización en la construcción de la dimensión, antes de crear los agregados, para evitar escrituras y consultas intermedias con categorías sin consolidar.
+**Reproducibilidad:** en el notebook entregado, la creación inicial de `dim_productos` (celda 24) no corrige por sí sola todos los valores con guion bajo. Para reproducir el **resultado final validado**, las celdas deben ejecutarse secuencialmente, **incluidas las celdas 29 y 30**. Esta limitación se circunscribe al orden interno del notebook Gold; el pipeline declarativo adicional utiliza `silver.catalogo` con categorías normalizadas y no modifica las seis respuestas analíticas.
 
 ![Gold P5: corrección de categorías](evidencias/gold/modelo_analitico/29_correccion_categorias_gold.png)
 
@@ -2939,7 +2935,7 @@ La celda **36** muestra los envíos individuales con fecha de inicio, fecha de e
 
 **Consideraciones técnicas:**
 
-1. Las 37 celdas se desarrollaron y validaron inicialmente de forma manual. Posteriormente, el notebook Gold se incorporó como última tarea de un **Job de 17 tareas**, ejecutado exitosamente de extremo a extremo; el **bundle declarativo YAML** continúa pendiente.
+1. Las 37 celdas se desarrollaron y validaron inicialmente de forma manual. Posteriormente, el notebook Gold se incorporó como última tarea de un **Job de 17 tareas**, ejecutado exitosamente de extremo a extremo. La configuración de ese Job y del pipeline declarativo adicional está versionada en un **bundle YAML**, desplegado en `dev` y `prod`.
 2. Las escrituras `CREATE OR REPLACE TABLE` reconstruyen los resultados Gold completos en cada corrida. Esta estrategia requiere ejecutar primero sus fuentes Silver y no equivale a una carga incremental Gold.
 3. El catálogo histórico de productos se usa para clasificar todas las reseñas; la dimensión Gold de 2 400 productos **no equivale** a los 2 349 productos válidos del snapshot Silver actual.
 4. La asignación de vendedores sin vigencia histórica se deja explícitamente en `SIN_ASIGNAR`; las 18 entregas sin evento `pendiente` conservan `horas_entrega = NULL`.
@@ -2955,7 +2951,7 @@ La celda **36** muestra los envíos individuales con fecha de inicio, fecha de e
 
 ### 7.1 Implementación del Job Medallion
 
-El Job **`electrocasa_pipeline_medallion`** se configuró en **Jobs & Pipelines** de Databricks Free Edition y ejecuta la arquitectura completa **Bronze → Silver → Gold**, con **17 tareas** y dependencias explícitas. La orquestación se creó y probó desde la interfaz gráfica del workspace; **aún no constituye un despliegue de Databricks Asset Bundles**.
+El Job **`electrocasa_pipeline_medallion`** se configuró en **Jobs & Pipelines** de Databricks Free Edition y ejecuta la arquitectura completa **Bronze → Silver → Gold**, con **17 tareas** y dependencias explícitas. La orquestación original se creó y probó desde la interfaz gráfica del workspace; posteriormente se exportó su definición con **View as code** y se incorporó al **Databricks Asset Bundle** desplegado en los targets `dev` y `prod`. El despliegue creó recursos independientes y no alteró el Job original.
 
 | Fase | Tareas | Diseño de la ejecución |
 |---|---:|---|
@@ -3088,11 +3084,81 @@ Esta configuración concuerda con el requisito de **lectura y escritura para Ing
 
 La demostración controlada de `GRANT SELECT` y posterior `REVOKE SELECT` sobre Silver ya se documenta en la **sección 3** y mantiene sus evidencias originales.
 
-### 7.7 Pendientes de entrega: bundle, auditoría y monitoreo
+### 7.7 Lakeflow Spark Declarative Pipeline: calidad y normalización
 
-- **Databricks Asset Bundles:** crear `databricks.yml` y los recursos declarativos en `resources/`, definir `dev` y `prod` y obtener evidencia de validación/despliegue exitoso. El Job configurado y probado en la UI **no equivale** a tener ese YAML desplegado.
-- **Auditoría y lineage:** documentar la consulta a `system.access` si está disponible o registrar la limitación de Free Edition y utilizar la pestaña **Lineage** de Catalog Explorer como alternativa, conforme al enunciado.
-- **Monitoreo y costos:** documentar historial de ejecución o event log, así como la justificación de Serverless para la frecuencia y criticidad del flujo.
-- **Verificación final del repositorio público:** revisar que los vínculos a las evidencias existan con la capitalización correcta (`evidencias/Seguridad/`) y que las imágenes públicas no expongan valores originales sensibles.
+Se implementó un pipeline adicional **`electrocasa_pipeline_declarativo`** en modo **Triggered** y con cómputo **Serverless**. Su archivo fuente reproducible se encuentra en [`pipelines/electrocasa_declarativo.py`](pipelines/electrocasa_declarativo.py). El objetivo es demostrar el procesamiento declarativo con vistas materializadas y expectativas de calidad, sin reemplazar los notebooks ni las diez tablas analíticas Gold del Job original.
 
-**Resumen:** Bronze, Silver, Gold, las **seis preguntas de negocio**, la ejecución integral del Job y la validación de enmascaramiento están completadas. El **despliegue declarativo con YAML y la documentación de auditoría** son las principales tareas aún pendientes; no se presentan como realizadas.
+El pipeline lee `proyecto_final.silver.catalogo`, cuyos valores de categoría ya fueron estandarizados por Silver. La primera vista materializada valida que `producto_id` y `categoria` no sean nulos ni vacíos mediante **dos expectativas `@dp.expect_or_drop`**: la política explícita descarta los registros incumplidos de esa salida. La segunda vista agrupa los productos válidos por `categoria`. Esta política declarativa es independiente de la cuarentena central de Silver; no se contabilizan esos descartes como nuevos registros de `silver.cuarentena`.
+
+| Vista materializada validada | Resultado |
+|---|---:|
+| `gold.electrocasa_catalogo_validado` | **2 349 productos** |
+| `gold.electrocasa_productos_por_categoria` | **5 categorías normalizadas** |
+| Suma de productos agrupados | **2 349** |
+| Diferencia entre totales | **0** |
+
+La ejecución del pipeline terminó correctamente y su interfaz mostró **2 expectativas cumplidas**. Las cinco categorías son `climatizacion` (469), `cocina` (453), `electronica` (439), `entretenimiento` (502) y `linea_blanca` (486). La conciliación de los totales prueba consistencia entre las dos vistas; no equivale a una garantía general de ausencia de registros inválidos en cualquier entrega futura.
+
+![Total de catálogo validado con pipeline declarativo](evidencias/pipelines/05_catalogo_validado_declarativo.png)
+
+![Productos del pipeline declarativo por cinco categorías](evidencias/pipelines/06_productos_por_categoria_declarativo.png)
+
+![Conciliación de 2 349 productos entre vistas materializadas](evidencias/pipelines/07_validacion_cruzada_declarativo.png)
+
+### 7.8 CI/CD: Databricks Asset Bundles en `main`
+
+El proyecto utiliza **una sola rama de GitHub, `main`**. Los targets `dev` y `prod` son **configuraciones del bundle**, no ramas Git. Ambos se despliegan desde el mismo workspace de Databricks Free Edition.
+
+La definición del despliegue está versionada en:
+
+```text
+proyecto-final-databricks/
+├── databricks.yml
+├── resources/
+│   ├── electrocasa_job.yml
+│   └── electrocasa_declarativo.yml
+├── pipelines/
+│   └── electrocasa_declarativo.py
+└── notebooks/
+    └── ...
+```
+
+`databricks.yml` incluye los archivos de `resources/` y define las variables del catálogo, del esquema de salida y del pipeline de Tracking existente. `resources/electrocasa_job.yml` reproduce las **17 tareas y sus dependencias** del Job Medallion. `resources/electrocasa_declarativo.yml` describe el recurso declarativo asociado al archivo Python. En el target `dev` la salida declarativa está configurada en `proyecto_final.gold_bundle_dev`; en `prod` se utiliza el esquema `proyecto_final.gold`. Las configuraciones de targets no suponen ramas distintas.
+
+**Resultado de despliegue comprobado en el panel Deployments:**
+
+| Target | Resultado del deployment | Recursos creados |
+|---|---|---:|
+| `dev` | `Finished deploy on "dev" target successfully` | 2 (Job + pipeline) |
+| `prod` | `Finished deploy on "prod" target successfully` | 2 (Job + pipeline) |
+
+En ambas operaciones se registraron **0 recursos modificados y 0 eliminados**. El despliegue creó recursos de Job y pipeline para cada target y conservó los recursos originales usados en las pruebas. **Desplegar no significa ejecutar:** la ejecución integral `Succeeded` de 17 tareas corresponde al Job original, mientras que las vistas materializadas ya fueron ejecutadas y validadas en el pipeline declarativo creado previamente.
+
+![Deployments exitosos del bundle para dev y prod](evidencias/pipelines/08_bundle_deploy_dev_prod_exitoso.png)
+
+### 7.9 Monitoreo y trazabilidad (lineage)
+
+El seguimiento operativo se realiza desde **Jobs & Pipelines → Runs**. La evidencia del Job original muestra la corrida del 21/11/2026, **Run ID `415695451415958`**, duración de **16 min 27 s**, estado final **`Succeeded`** y avance de las tareas Bronze, Silver y Gold. Las evidencias están en `03a`, `03b` y `03c` de `evidencias/pipelines/`, mostradas en la sección 7.1. Este historial es la fuente de monitoreo utilizada para la entrega; no se afirma haber consultado las tablas `system.lakeflow`.
+
+Para la trazabilidad de datos se utilizó el enlace **Lineage** del Job original. La interfaz muestra el inventario combinado de las ejecuciones de los últimos 30 días:
+
+- **25 tablas upstream**, es decir, tablas que el Job leyó.
+- **20 tablas downstream**, es decir, tablas sobre las que el Job escribió.
+
+En ese inventario aparecen objetos de las tres capas de `proyecto_final`, incluida `silver.cuarentena`, y las tablas analíticas Gold. Los conteos corresponden al inventario de lineage del Job, no a un conteo de tablas físicas únicas de todo el catálogo ni a una auditoría de accesos de cada usuario.
+
+![Lineage: tablas consultadas por el Job](evidencias/pipelines/09_lineage_tablas_origen.png)
+
+![Lineage: primeras tablas escritas por el Job](evidencias/pipelines/10_lineage_tablas_destino_01.png)
+
+![Lineage: continuación de las tablas escritas por el Job](evidencias/pipelines/11_lineage_tablas_destino_02.png)
+
+**Auditoría en Free Edition:** el enunciado contempla las tablas del esquema `system.access`; en esta entrega la evidencia visual disponible corresponde al lineage expuesto por la interfaz del Job. No se adjunta un resultado de consulta a `system.access.audit`, `system.access.table_lineage` o `system.access.column_lineage`, por lo que no se presenta acceso a esas tablas como una prueba realizada.
+
+### 7.10 Compute, operación y cierre
+
+Se utiliza **Serverless** para los notebooks del Job y para el pipeline declarativo, en consonancia con Databricks Free Edition y con una carga por lotes pequeña. El modo **Triggered** del componente declarativo evita mantener cómputo continuo cuando no hay trabajo. Las ingestas incrementales mediante Auto Loader emplean `availableNow=True`, y `COPY INTO` controla archivos previamente procesados; el Job mantiene dependencias para impedir que Gold se ejecute antes de las validaciones anteriores.
+
+La estrategia secuencial de Silver reduce la posibilidad de conflictos de escritura sobre la cuarentena compartida. Como medida operativa, los despliegues `dev` y `prod` no implican ejecutar simultáneamente sus pipelines sobre el mismo workspace: las pruebas de ejecución del Job original y del pipeline declarativo se realizaron por separado.
+
+**Cierre de resultados comprobados:** se conservaron los modelos Gold y sus seis respuestas de negocio; el Job original ejecutó exitosamente las 17 tareas; Silver preservó **1 776 rechazos**; el pipeline declarativo produjo **2 349 productos** en **cinco categorías**, con dos expectativas de calidad declaradas y resultados consistentes; y el bundle se desplegó exitosamente en `dev` y `prod`. El repositorio público contiene el código, los recursos YAML y las capturas correspondientes. Las comprobaciones realizadas quedan diferenciadas de las pruebas que no se aportaron, evitando atribuir a una evidencia más alcance del que realmente demuestra.
